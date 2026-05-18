@@ -1,5 +1,9 @@
 # Kubernetes Bastion Runtime
 
+<div align="center">
+  <img src="assets/brand/platform-k8s-bastion-forge-avatar-transparent-512.png" width="256" alt="Kubernetes Bastion Runtime logo">
+</div>
+
 `platform-k8s-bastion` is the runtime artifact source for Kubernetes bastion hosts.
 
 Host installation, OS packages, external CLI downloads, `/etc/bastion` files, login profile, and systemd units are owned by `platform-config` Ansible. This repository intentionally does not install or configure hosts directly.

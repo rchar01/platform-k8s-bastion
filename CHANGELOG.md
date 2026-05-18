@@ -7,6 +7,12 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-18
+
+### Added
+
+- Add project brand assets and display the transparent logo in the README.
+
 ## [1.0.0] - 2026-05-18
 
 ### Added

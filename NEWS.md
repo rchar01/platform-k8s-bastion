@@ -2,6 +2,15 @@
 
 This file gives a short, release-oriented view of what changed between versions.
 
+## v1.0.1 - 2026-05-18
+
+Documentation and branding update.
+
+Highlights:
+
+- Added project brand assets.
+- Displayed the transparent project logo in the README.
+
 ## v1.0.0 - 2026-05-18
 
 Initial runtime-only release of `platform-k8s-bastion`.
