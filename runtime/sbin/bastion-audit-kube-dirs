@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-audit-kube-dirs"
+
+# --------------------------------------------------
+# Resolve bastion library location
+# --------------------------------------------------
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+
+# --------------------------------------------------
+# Defaults
+# --------------------------------------------------
+
+HOME_PREFIX="/home"
+SHOW_CONTENTS=1
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-audit-kube-dirs [options]
+
+Options:
+  --home-prefix DIR   scan homes under DIR (default: /home)
+  --no-list           do not list directory contents
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --home-prefix)
+        HOME_PREFIX="$2"
+        shift 2
+        ;;
+      --no-list)
+        SHOW_CONTENTS=0
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+# --------------------------------------------------
+# Output helpers
+# --------------------------------------------------
+
+print_header() {
+  printf "%-20s %-40s %s\n" "USER" "HOME" ".kube"
+  printf "%-20s %-40s %s\n" "----" "----" "-----"
+}
+
+print_row() {
+  printf "%-20s %-40s %s\n" "$1" "$2" "$3"
+}
+
+list_kube_dir() {
+  local dir="$1"
+
+  [[ "$SHOW_CONTENTS" -eq 1 ]] || return 0
+
+  local listing
+  listing="$(ls -la "$dir" 2> /dev/null | sed 's/[[:space:]]\+/ /g' | tail -n +2 || true)"
+
+  if [[ -n "$listing" ]]; then
+    echo "$listing" | sed 's/^/  /'
+  fi
+}
+
+# --------------------------------------------------
+# Audit logic
+# --------------------------------------------------
+
+audit_users() {
+  while IFS=: read -r user _ uid gid gecos home shell; do
+
+    [[ "$home" == ${HOME_PREFIX}/* ]] || continue
+    [[ -d "$home" ]] || continue
+
+    local kube_dir="$home/.kube"
+
+    if [[ -d "$kube_dir" ]]; then
+      if [[ -z "$(ls -A "$kube_dir" 2> /dev/null || true)" ]]; then
+        print_row "$user" "$home" "(exists; empty)"
+      else
+        print_row "$user" "$home" "(exists)"
+        list_kube_dir "$kube_dir"
+      fi
+    else
+      print_row "$user" "$home" "(absent)"
+    fi
+
+  done < /etc/passwd
+}
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+main() {
+  require_root
+
+  need_cmd ls
+  need_cmd sed
+  need_cmd tail
+
+  parse_args "$@"
+
+  log_debug "Scanning homes under: $HOME_PREFIX"
+
+  print_header
+  audit_users
+
+  log_debug "Audit complete."
+}
+
+main "$@"

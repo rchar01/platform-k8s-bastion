@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-cert-renew-all"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+
+main() {
+  require_root
+
+  need_cmd getent
+  need_cmd runuser
+  need_cmd bastion-renew-cert
+
+  local u uid home failures=0
+  while IFS=: read -r u _ uid _ _ home _; do
+    [[ -n "$u" ]] || continue
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    ((uid >= 1000)) || continue
+    [[ "$u" == "nobody" ]] && continue
+    [[ -d "$home/.kube" ]] || continue
+    [[ -f "$home/.kube/config" ]] || continue
+
+    if ! runuser -u "$u" -- bastion-renew-cert --quiet > /dev/null 2>&1; then
+      log_warn "Renew failed for user: $u"
+      failures=1
+    fi
+  done < <(getent passwd)
+
+  exit "$failures"
+}
+
+main "$@"

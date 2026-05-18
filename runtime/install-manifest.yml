@@ -1,0 +1,81 @@
+---
+apiVersion: platform.rch/v1
+kind: BastionRuntimeInstallManifest
+
+paths:
+  lib: /usr/local/lib/bastion
+  pythonLib: /usr/local/lib/bastion/python
+  internalBin: /usr/local/lib/bastion/internal
+  bin: /usr/local/bin
+  sbin: /usr/local/sbin
+  libexec: /usr/libexec
+  etc: /etc/bastion
+
+publicCommands:
+  mode: "0755"
+  sourceDir: bin
+  destination: /usr/local/bin
+  files:
+    - bastion-renew-cert
+    - bastion-kubeconfig-expiry
+    - bastion-version
+
+internalCommands:
+  mode: "0755"
+  sourceDir: internal-bin
+  destination: /usr/local/lib/bastion/internal
+  files:
+    - bastion-bootstrapd-client
+    - bastion-enroll-cert
+    - bastion-kube-state
+    - bastion-login-bootstrap
+
+adminCommands:
+  mode: "0750"
+  sourceDir: sbin
+  destination: /usr/local/sbin
+  files:
+    - bastion-audit-kube-dirs
+    - bastion-bootstrap-admin-kubeconfig
+    - bastion-bootstrap-kubeconfig
+    - bastion-bootstrap-token-issue
+    - bastion-bootstrap-token-revoke
+    - bastion-bootstrap-user-groups
+    - bastion-bootstrapd
+    - bastion-cert-renew-all
+    - bastion-cluster-probe
+    - bastion-csr-approver
+    - bastion-csr-cleanup
+    - bastion-disable-user
+
+libraries:
+  mode: "0644"
+  sourceDir: lib
+  destination: /usr/local/lib/bastion
+  patterns:
+    - "*.sh"
+
+pythonLibraries:
+  mode: "0644"
+  sourceDir: lib/python
+  destination: /usr/local/lib/bastion/python
+  patterns:
+    - "*.py"
+
+libexec:
+  mode: "0755"
+  sourceDir: libexec
+  destination: /usr/libexec
+  optional: true
+
+removedLegacyCommands:
+  - bastion-bootstrap-machine
+  - bastion-bootstrap-users
+  - bastion-install-podman
+  - bastion-install-tools
+  - bastion-login-profile
+  - bastion-manage-bootstrapd
+  - bastion-manage-cert-renew-timer
+  - bastion-manage-cluster-status-timer
+  - bastion-manage-csr-timers
+  - bastion-render-policy

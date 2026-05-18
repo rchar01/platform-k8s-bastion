@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-cluster-probe"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+
+ADMIN_KUBECONFIG="/etc/bastion/admin.kubeconfig"
+OUTPUT_FILE="/run/bastion-cluster-status.json"
+API_TIMEOUT_SECONDS="3"
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-cluster-probe [--kubeconfig FILE] [--output FILE] [--timeout-sec N]
+
+Writes compact cluster status JSON for login banner consumption.
+
+Defaults:
+  --kubeconfig /etc/bastion/admin.kubeconfig
+  --output /run/bastion-cluster-status.json
+  --timeout-sec 3
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kubeconfig)
+        ADMIN_KUBECONFIG="$2"
+        shift 2
+        ;;
+      --output)
+        OUTPUT_FILE="$2"
+        shift 2
+        ;;
+      --timeout-sec)
+        API_TIMEOUT_SECONDS="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+write_status() {
+  local health="$1"
+  local cluster_name="$2"
+  local api_server="$3"
+  local ready_nodes="$4"
+  local total_nodes="$5"
+  local api_latency_ms="$6"
+  local error_message="$7"
+  local generated_epoch generated_iso tmp output_dir
+
+  generated_epoch="$(date +%s)"
+  generated_iso="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  output_dir="$(dirname "$OUTPUT_FILE")"
+
+  install -d "$output_dir"
+  tmp="$(mktemp "$output_dir/.bastion-cluster-status.XXXXXX")"
+
+  jq -n \
+    --arg generated_at "$generated_iso" \
+    --argjson generated_at_epoch "$generated_epoch" \
+    --arg health "$health" \
+    --arg cluster_name "$cluster_name" \
+    --arg api_server "$api_server" \
+    --argjson ready_nodes "$ready_nodes" \
+    --argjson total_nodes "$total_nodes" \
+    --argjson api_latency_ms "$api_latency_ms" \
+    --arg error "$error_message" \
+    '{
+      generated_at: $generated_at,
+      generated_at_epoch: $generated_at_epoch,
+      health: $health,
+      cluster_name: $cluster_name,
+      api_server: $api_server,
+      ready_nodes: $ready_nodes,
+      total_nodes: $total_nodes,
+      api_latency_ms: $api_latency_ms,
+      error: $error
+    }' > "$tmp"
+
+  chmod 0644 "$tmp"
+  mv "$tmp" "$OUTPUT_FILE"
+}
+
+probe_cluster() {
+  local admin_cfg admin_ctx cluster_name api_server start_ns end_ns latency_ms
+  local nodes_raw total_nodes ready_nodes
+
+  if [[ ! -f "$ADMIN_KUBECONFIG" ]]; then
+    write_status "DOWN" "-" "-" 0 0 0 "admin kubeconfig missing: $ADMIN_KUBECONFIG"
+    return 0
+  fi
+
+  admin_cfg="$(kubectl config view --raw --kubeconfig "$ADMIN_KUBECONFIG" -o json 2> /dev/null || true)"
+  if [[ -z "$admin_cfg" ]]; then
+    write_status "DOWN" "-" "-" 0 0 0 "cannot read admin kubeconfig: $ADMIN_KUBECONFIG"
+    return 0
+  fi
+
+  admin_ctx="$(jq -r '.["current-context"] // ""' <<< "$admin_cfg")"
+  cluster_name="$(jq -r --arg ctx "$admin_ctx" '.contexts[]? | select(.name == $ctx) | .context.cluster // ""' <<< "$admin_cfg" | head -n1)"
+  api_server="$(jq -r --arg cluster "$cluster_name" '.clusters[]? | select(.name == $cluster) | .cluster.server // ""' <<< "$admin_cfg" | head -n1)"
+
+  [[ -n "$cluster_name" ]] || cluster_name="-"
+  [[ -n "$api_server" ]] || api_server="-"
+
+  start_ns="$(date +%s%N)"
+  if ! timeout "${API_TIMEOUT_SECONDS}s" kubectl --kubeconfig="$ADMIN_KUBECONFIG" get --raw=/readyz > /dev/null 2>&1; then
+    write_status "DOWN" "$cluster_name" "$api_server" 0 0 0 "API unreachable"
+    return 0
+  fi
+  end_ns="$(date +%s%N)"
+  latency_ms="$(((end_ns - start_ns) / 1000000))"
+
+  nodes_raw="$(timeout "${API_TIMEOUT_SECONDS}s" kubectl --kubeconfig="$ADMIN_KUBECONFIG" get nodes --no-headers 2> /dev/null || true)"
+  if [[ -n "$nodes_raw" ]]; then
+    total_nodes="$(awk 'END{print NR+0}' <<< "$nodes_raw")"
+    ready_nodes="$(awk '$2 ~ /Ready/ && $2 !~ /NotReady/ {count++} END {print count+0}' <<< "$nodes_raw")"
+  else
+    total_nodes=0
+    ready_nodes=0
+  fi
+
+  if ((total_nodes > 0 && ready_nodes < total_nodes)); then
+    write_status "DEGRADED" "$cluster_name" "$api_server" "$ready_nodes" "$total_nodes" "$latency_ms" ""
+  else
+    write_status "OK" "$cluster_name" "$api_server" "$ready_nodes" "$total_nodes" "$latency_ms" ""
+  fi
+}
+
+main() {
+  require_root
+
+  need_cmd kubectl
+  need_cmd jq
+  need_cmd timeout
+  need_cmd install
+  need_cmd mv
+  need_cmd chmod
+  need_cmd awk
+
+  parse_args "$@"
+  probe_cluster
+}
+
+main "$@"

@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-bootstrap-user-groups"
+
+# --------------------------------------------------
+# Resolve bastion library location
+# --------------------------------------------------
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+
+# --------------------------------------------------
+# Defaults
+# --------------------------------------------------
+
+POLICY="/etc/bastion/access-policy.yaml"
+DAEMON_LOGIN_GROUP=""
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-bootstrap-user-groups [--policy FILE]
+
+Ensures Linux groups exist and users belong to groups
+defined in the access policy.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --policy)
+        POLICY="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+validate_inputs() {
+  [[ -f "$POLICY" ]] || die "Policy not found: $POLICY"
+  DAEMON_LOGIN_GROUP="$(yq -r '.daemon.allowedLoginGroup // ""' "$POLICY")"
+  [[ -n "$DAEMON_LOGIN_GROUP" ]] || die "daemon.allowedLoginGroup missing in policy"
+}
+
+# --------------------------------------------------
+# Group management
+# --------------------------------------------------
+
+ensure_group_exists() {
+  local group="$1"
+
+  if getent group "$group" > /dev/null 2>&1; then
+    log_debug "Group exists: $group"
+    return
+  fi
+
+  log_info "Creating group: $group"
+  groupadd "$group"
+}
+
+ensure_user_in_group() {
+  local user="$1"
+  local group="$2"
+
+  # user must exist
+  if ! getent passwd "$user" > /dev/null 2>&1; then
+    log_warn "User not found on host: $user (skipping)"
+    return
+  fi
+
+  # already member?
+  if id -nG "$user" | tr ' ' '\n' | grep -qx "$group"; then
+    log_debug "$user already in $group"
+    return
+  fi
+
+  log_info "Adding $user → group $group"
+  usermod -aG "$group" "$user"
+}
+
+# --------------------------------------------------
+# Policy processing
+# --------------------------------------------------
+
+ensure_all_groups() {
+  log_info "Ensuring groups exist"
+
+  mapfile -t groups < <(yq -r '.groups | keys[]' "$POLICY")
+
+  for g in "${groups[@]}"; do
+    ensure_group_exists "$g"
+  done
+}
+
+get_user_groups() {
+  local user="$1"
+
+  yq -r "
+    (.users.${user}.ensureGroups // [])
+    | .[]
+  " "$POLICY" 2> /dev/null || true
+}
+
+process_users() {
+  log_info "Processing users"
+
+  mapfile -t users < <(yq -r '.users | keys[]' "$POLICY")
+
+  for user in "${users[@]}"; do
+    log_debug "Evaluating user: $user"
+
+    while IFS= read -r group; do
+      [[ -n "$group" ]] || continue
+      ensure_group_exists "$group"
+      ensure_user_in_group "$user" "$group"
+    done < <(get_user_groups "$user")
+
+    ensure_group_exists "$DAEMON_LOGIN_GROUP"
+    ensure_user_in_group "$user" "$DAEMON_LOGIN_GROUP"
+
+  done
+}
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+main() {
+  require_root
+
+  need_cmd yq
+  need_cmd getent
+  need_cmd groupadd
+  need_cmd usermod
+  need_cmd id
+  need_cmd grep
+
+  parse_args "$@"
+  validate_inputs
+
+  log_info "Using policy: $POLICY"
+
+  ensure_all_groups
+  process_users
+
+  log_info "User/group bootstrap complete."
+}
+
+main "$@"

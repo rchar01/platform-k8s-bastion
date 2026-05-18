@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-bootstrap-token-revoke"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/audit.sh"
+
+ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG_FILE}"
+ISSUER_SERVICE_NAME="bastion-token-issuer"
+ISSUER_SERVICE_PORT_NAME="http"
+
+TOKEN_ID=""
+BEST_EFFORT=0
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-bootstrap-token-revoke --token-id ID [--best-effort]
+
+Revoke bootstrap token via in-cluster issuer API.
+
+Options:
+  --token-id ID             token identifier
+  --best-effort             do not fail on revoke errors
+  --admin-kubeconfig FILE   admin kubeconfig path (default: ${ADMIN_KUBECONFIG})
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token-id)
+        TOKEN_ID="$2"
+        shift 2
+        ;;
+      --best-effort)
+        BEST_EFFORT=1
+        shift
+        ;;
+      --admin-kubeconfig)
+        ADMIN_KUBECONFIG="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$TOKEN_ID" ]] || die "--token-id is required"
+}
+
+issuer_post() {
+  local path="$1"
+  local body_file="$2"
+  local raw_path
+
+  raw_path="/api/v1/namespaces/${CONTROLLER_NAMESPACE}/services/${ISSUER_SERVICE_NAME}:${ISSUER_SERVICE_PORT_NAME}/proxy${path}"
+  kubectl --kubeconfig "$ADMIN_KUBECONFIG" create --raw "$raw_path" -f "$body_file"
+}
+
+main() {
+  require_root
+
+  need_cmd kubectl
+  need_cmd jq
+  need_cmd mktemp
+
+  parse_args "$@"
+  [[ -f "$ADMIN_KUBECONFIG" ]] || die "Admin kubeconfig not found: $ADMIN_KUBECONFIG"
+
+  local req err_file
+  req="$(mktemp)"
+  err_file="$(mktemp)"
+  trap 'rm -f "$req" "$err_file"' EXIT
+  jq -n --arg tokenId "$TOKEN_ID" '{tokenId: $tokenId}' > "$req"
+
+  audit_event "bootstrap_token_revoke" "start" "token_id=${TOKEN_ID}"
+  if ! issuer_post "/v1/bootstrap-token/revoke" "$req" > /dev/null 2> "$err_file"; then
+    audit_event "bootstrap_token_revoke" "error" "token_id=${TOKEN_ID}"
+    if [[ "$BEST_EFFORT" -eq 1 ]]; then
+      log_warn "Issuer revoke failed (best-effort): $(tr '\n' ' ' < "$err_file")"
+      exit 0
+    fi
+    die "Issuer revoke failed: $(tr '\n' ' ' < "$err_file")"
+  fi
+
+  audit_event "bootstrap_token_revoke" "ok" "token_id=${TOKEN_ID}"
+}
+
+main "$@"

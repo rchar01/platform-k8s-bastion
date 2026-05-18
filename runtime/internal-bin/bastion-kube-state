@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-kube-state"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+
+KUBE_DIR="${HOME}/.kube"
+KUBECONFIG_PATH="${KUBE_DIR}/config"
+USER_CERT_PATH="${KUBE_DIR}/user.crt"
+USER_KEY_PATH="${KUBE_DIR}/user.key"
+
+json_out() {
+  jq -n \
+    --arg status "$1" \
+    --arg reason "$2" \
+    --arg certNotBefore "${3:-}" \
+    --arg certNotAfter "${4:-}" \
+    --argjson remainingSeconds "${5:-0}" \
+    --arg kubeconfig "$KUBECONFIG_PATH" \
+    --arg certFile "$USER_CERT_PATH" \
+    --arg keyFile "$USER_KEY_PATH" \
+    '{
+      status: $status,
+      reason: $reason,
+      certNotBefore: $certNotBefore,
+      certNotAfter: $certNotAfter,
+      remainingSeconds: $remainingSeconds,
+      kubeconfig: $kubeconfig,
+      certFile: $certFile,
+      keyFile: $keyFile
+    }'
+}
+
+main() {
+  need_cmd jq
+  need_cmd kubectl
+  need_cmd openssl
+  need_cmd date
+  need_cmd yq
+
+  policy_read
+
+  if [[ ! -f "$KUBECONFIG_PATH" || ! -f "$USER_CERT_PATH" || ! -f "$USER_KEY_PATH" ]]; then
+    json_out "missing" "required_file_missing"
+    return 0
+  fi
+
+  if [[ ! -r "$KUBECONFIG_PATH" || ! -r "$USER_CERT_PATH" || ! -r "$USER_KEY_PATH" ]]; then
+    json_out "broken" "required_file_unreadable"
+    return 0
+  fi
+
+  if ! openssl pkey -in "$USER_KEY_PATH" -noout > /dev/null 2>&1; then
+    json_out "broken" "invalid_private_key"
+    return 0
+  fi
+
+  local cert_info not_before not_after exp now remaining
+  cert_info="$(openssl x509 -in "$USER_CERT_PATH" -noout -startdate -enddate 2> /dev/null || true)"
+  [[ -n "$cert_info" ]] || {
+    json_out "broken" "invalid_certificate"
+    return 0
+  }
+
+  not_before="$(sed -n 's/^notBefore=//p' <<< "$cert_info")"
+  not_after="$(sed -n 's/^notAfter=//p' <<< "$cert_info")"
+  exp="$(date -d "$not_after" +%s 2> /dev/null || true)"
+  now="$(date +%s)"
+  [[ -n "$exp" ]] || {
+    json_out "broken" "invalid_certificate_dates"
+    return 0
+  }
+
+  remaining="$((exp - now))"
+
+  if ! kubectl config view --raw --kubeconfig "$KUBECONFIG_PATH" -o json > /dev/null 2>&1; then
+    json_out "broken" "invalid_kubeconfig" "$not_before" "$not_after" "$remaining"
+    return 0
+  fi
+
+  if ((remaining <= 0)); then
+    json_out "expired" "certificate_expired" "$not_before" "$not_after" "$remaining"
+    return 0
+  fi
+
+  if ((remaining < CLIENT_CERT_RENEW_THRESHOLD_SECONDS)); then
+    json_out "renewable" "within_renew_window" "$not_before" "$not_after" "$remaining"
+    return 0
+  fi
+
+  json_out "valid" "certificate_valid" "$not_before" "$not_after" "$remaining"
+}
+
+main "$@"

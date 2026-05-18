@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-csr-cleanup"
+
+# -----------------------------------------------------------------------------
+# Kubernetes CSR garbage collection
+#
+# Removes approved CSRs older than retention period.
+# Safe for periodic execution (cron/systemd timer).
+# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
+# Resolve bastion library location
+# --------------------------------------------------
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+source "${LIB_DIR}/audit.sh"
+
+# --------------------------------------------------
+# Defaults
+# --------------------------------------------------
+
+# default: 14 days
+RETENTION_SECONDS=$((14 * 24 * 60 * 60))
+POLICY="${POLICY_FILE}"
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-csr-cleanup [--retention-days N] [--policy FILE]
+
+Deletes approved Kubernetes CSRs older than retention period.
+
+Options:
+  --retention-days N   retention window (default: 14)
+  --policy FILE        policy yaml (default: $POLICY)
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --retention-days)
+        RETENTION_SECONDS=$(($2 * 24 * 60 * 60))
+        shift 2
+        ;;
+      --policy)
+        POLICY="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+# --------------------------------------------------
+# CSR selection
+# --------------------------------------------------
+
+expired_csrs() {
+  kubectl get csr -o json \
+    | jq -r --arg signer "$CSR_SIGNER_NAME" \
+      --argjson now "$(date +%s)" \
+      --argjson retention "$RETENTION_SECONDS" '
+      .items[]
+      | select(.metadata.labels["bastion-access"] == "true")
+      | select(.spec.signerName == $signer)
+      | . as $csr
+      | (
+          (.metadata.creationTimestamp | fromdateiso8601)
+          < ($now - $retention)
+        )
+      | $csr.metadata.name
+    ' 2> /dev/null || true
+}
+
+delete_csr() {
+  local csr="$1"
+
+  kubectl delete csr "$csr" > /dev/null
+  log_info "Deleted expired CSR: $csr"
+  audit_event "csr_cleanup" "ok" "csr=${csr}"
+}
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+main() {
+  require_root
+
+  need_cmd kubectl
+  need_cmd jq
+  need_cmd date
+  need_cmd yq
+
+  parse_args "$@"
+
+  POLICY_FILE="$POLICY"
+  policy_read
+
+  log_debug "Retention seconds: $RETENTION_SECONDS"
+
+  local found=0
+
+  while IFS= read -r csr; do
+    [[ -z "$csr" ]] && continue
+    found=1
+    delete_csr "$csr"
+  done < <(expired_csrs)
+
+  if [[ "$found" -eq 0 ]]; then
+    log_debug "No expired CSRs found"
+  fi
+}
+
+main "$@"

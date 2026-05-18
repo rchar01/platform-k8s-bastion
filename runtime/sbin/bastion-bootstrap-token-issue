@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-bootstrap-token-issue"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+source "${LIB_DIR}/audit.sh"
+
+ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG_FILE}"
+ISSUER_SERVICE_NAME="bastion-token-issuer"
+ISSUER_SERVICE_PORT_NAME="http"
+
+TARGET_USER=""
+REASON="manual-recovery"
+TTL_SECONDS=""
+OUTPUT_JSON=0
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-bootstrap-token-issue --user USER [--reason REASON] [--ttl-seconds N] [--json]
+
+Issue short-lived bootstrap kubeconfig via in-cluster issuer API.
+
+Options:
+  --user USER               linux username
+  --reason REASON           initial-enrollment | login-recovery | manual-recovery
+  --ttl-seconds N           bootstrap TTL seconds (default/max loaded from policy)
+  --json                    print JSON response
+  --admin-kubeconfig FILE   admin kubeconfig path (default: ${ADMIN_KUBECONFIG})
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user)
+        TARGET_USER="$2"
+        shift 2
+        ;;
+      --reason)
+        REASON="$2"
+        shift 2
+        ;;
+      --ttl-seconds)
+        TTL_SECONDS="$2"
+        shift 2
+        ;;
+      --json)
+        OUTPUT_JSON=1
+        shift
+        ;;
+      --admin-kubeconfig)
+        ADMIN_KUBECONFIG="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$TARGET_USER" ]] || die "--user is required"
+  [[ "$TTL_SECONDS" =~ ^[0-9]+$ ]] || die "--ttl-seconds must be integer"
+  case "$REASON" in
+    initial-enrollment | login-recovery | manual-recovery) ;;
+    *)
+      die "Invalid --reason: $REASON"
+      ;;
+  esac
+
+  if ((TTL_SECONDS < 60)); then
+    die "--ttl-seconds too small (min 60)"
+  fi
+  if ((TTL_SECONDS > BOOTSTRAP_TOKEN_TTL_MAX_SECONDS)); then
+    die "--ttl-seconds exceeds max ${BOOTSTRAP_TOKEN_TTL_MAX_SECONDS}"
+  fi
+}
+
+issuer_post() {
+  local path="$1"
+  local body_file="$2"
+  local raw_path
+
+  raw_path="/api/v1/namespaces/${CONTROLLER_NAMESPACE}/services/${ISSUER_SERVICE_NAME}:${ISSUER_SERVICE_PORT_NAME}/proxy${path}"
+  kubectl --kubeconfig "$ADMIN_KUBECONFIG" create --raw "$raw_path" -f "$body_file"
+}
+
+main() {
+  require_root
+
+  need_cmd kubectl
+  need_cmd jq
+  need_cmd mktemp
+  need_cmd getent
+
+  policy_read
+  TTL_SECONDS="$BOOTSTRAP_TOKEN_TTL_DEFAULT_SECONDS"
+  parse_args "$@"
+  [[ -f "$ADMIN_KUBECONFIG" ]] || die "Admin kubeconfig not found: $ADMIN_KUBECONFIG"
+  getent passwd "$TARGET_USER" > /dev/null 2>&1 || die "User not found: $TARGET_USER"
+
+  local req resp token_id expires_at bootstrap_kubeconfig err_file
+  req="$(mktemp)"
+  err_file="$(mktemp)"
+  trap 'rm -f "$req" "$err_file"' EXIT
+
+  jq -n \
+    --arg user "$TARGET_USER" \
+    --arg reason "$REASON" \
+    --argjson ttlSeconds "$TTL_SECONDS" \
+    '{user: $user, reason: $reason, ttlSeconds: $ttlSeconds}' > "$req"
+
+  audit_event "bootstrap_token_issue" "start" "user=${TARGET_USER} reason=${REASON} ttl=${TTL_SECONDS}"
+  if ! resp="$(issuer_post "/v1/bootstrap-token/issue" "$req" 2> "$err_file")"; then
+    audit_event "bootstrap_token_issue" "error" "user=${TARGET_USER} reason=${REASON}"
+    die "Issuer issue call failed: $(tr '\n' ' ' < "$err_file")"
+  fi
+
+  token_id="$(jq -r '.tokenId // empty' <<< "$resp")"
+  expires_at="$(jq -r '.expiresAt // empty' <<< "$resp")"
+  bootstrap_kubeconfig="$(jq -r '.bootstrapKubeconfig // empty' <<< "$resp")"
+
+  [[ -n "$token_id" ]] || die "Issuer response missing tokenId"
+  [[ -n "$expires_at" ]] || die "Issuer response missing expiresAt"
+  [[ -n "$bootstrap_kubeconfig" ]] || die "Issuer response missing bootstrapKubeconfig"
+
+  audit_event "bootstrap_token_issue" "ok" "user=${TARGET_USER} token_id=${token_id}"
+
+  if [[ "$OUTPUT_JSON" -eq 1 ]]; then
+    jq -n \
+      --arg tokenId "$token_id" \
+      --arg expiresAt "$expires_at" \
+      --arg bootstrapKubeconfig "$bootstrap_kubeconfig" \
+      '{tokenId: $tokenId, expiresAt: $expiresAt, bootstrapKubeconfig: $bootstrapKubeconfig}'
+  else
+    printf '%s\n' "$bootstrap_kubeconfig"
+  fi
+}
+
+main "$@"

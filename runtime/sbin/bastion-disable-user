@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-disable-user"
+
+# -----------------------------------------------------------------------------
+# Bastion user deactivation
+#
+# Removes bastion-managed Kubernetes access for a target user on the host.
+# Intended flow:
+#   1. Remove the user from bastion policy
+#   2. Run this command for the target user
+#   3. Reconcile or verify resulting state as needed
+# -----------------------------------------------------------------------------
+
+# --------------------------------------------------
+# Resolve bastion library location
+# --------------------------------------------------
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+
+# --------------------------------------------------
+# Defaults
+# --------------------------------------------------
+
+POLICY="/etc/bastion/access-policy.yaml"
+TARGET_USER=""
+DRY_RUN=0
+FORCE=0
+
+REMOVED_GROUPS=0
+DISABLED_FILES=0
+SKIPPED_GROUPS=0
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-disable-user --user USER [--policy FILE] [--dry-run] [--force]
+
+Removes bastion-managed Kubernetes access for a target user by:
+  - removing matching bastion groups from the host user
+  - disabling ~/.kube/bootstrap
+  - disabling ~/.kube/config
+
+Expected workflow:
+  1. Remove or update the user in bastion policy
+  2. Run bastion-disable-user for that user
+
+Options:
+  --user USER    Target user to disable. Required.
+  --policy FILE  Policy file used to determine group prefix.
+                 Default: $POLICY
+  --dry-run      Show intended actions without changing the system.
+  --force        Proceed even if the user still exists in policy.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --user)
+        TARGET_USER="$2"
+        shift 2
+        ;;
+      --policy)
+        POLICY="$2"
+        shift 2
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --force)
+        FORCE=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$TARGET_USER" ]] || die "--user is required"
+}
+
+policy_has_user() {
+  local user="$1"
+  yq -e ".users.${user}" "$POLICY" > /dev/null 2>&1
+}
+
+validate_inputs() {
+  [[ -f "$POLICY" ]] || die "Policy not found: $POLICY"
+  getent passwd "$TARGET_USER" > /dev/null 2>&1 || die "User not found on host: $TARGET_USER"
+
+  if policy_has_user "$TARGET_USER" && [[ "$FORCE" -ne 1 ]]; then
+    die "User '$TARGET_USER' still exists in policy. Remove the user from policy first or use --force."
+  fi
+}
+
+run_cmd() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "DRY RUN: $*"
+    return 0
+  fi
+
+  "$@"
+}
+
+disable_file_if_present() {
+  local path="$1"
+
+  [[ -f "$path" ]] || return 0
+
+  local backup
+  backup="${path}.disabled.$(date -u +%Y%m%dT%H%M%SZ)"
+
+  log_info "Disabling file: $path -> $backup"
+  run_cmd mv "$path" "$backup"
+  DISABLED_FILES=$((DISABLED_FILES + 1))
+}
+
+remove_group_if_member() {
+  local user="$1"
+  local group="$2"
+  local primary_group="$3"
+
+  if [[ "$group" == "$primary_group" ]]; then
+    log_warn "Skipping primary group for $user: $group"
+    SKIPPED_GROUPS=$((SKIPPED_GROUPS + 1))
+    return 0
+  fi
+
+  if ! id -nG "$user" | tr ' ' '\n' | grep -qx "$group"; then
+    log_debug "$user is not in group $group"
+    return 0
+  fi
+
+  log_info "Removing $user from group $group"
+  run_cmd gpasswd -d "$user" "$group" > /dev/null
+  REMOVED_GROUPS=$((REMOVED_GROUPS + 1))
+}
+
+disable_kube_access() {
+  local home_dir kube_dir
+
+  home_dir="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+  [[ -n "$home_dir" ]] || die "Cannot resolve home directory for user: $TARGET_USER"
+
+  kube_dir="$home_dir/.kube"
+
+  disable_file_if_present "$kube_dir/bootstrap"
+  disable_file_if_present "$kube_dir/config"
+}
+
+remove_bastion_groups() {
+  local prefix primary_group group
+
+  prefix="$(yq -r '.csr.groupPrefix' "$POLICY")"
+  [[ -n "$prefix" && "$prefix" != "null" ]] || die "csr.groupPrefix missing in policy"
+
+  primary_group="$(id -gn "$TARGET_USER")"
+
+  while IFS= read -r group; do
+    [[ -n "$group" ]] || continue
+    remove_group_if_member "$TARGET_USER" "$group" "$primary_group"
+  done < <(id -nG "$TARGET_USER" | tr ' ' '\n' | grep "^${prefix}" || true)
+}
+
+show_summary() {
+  log_info "Disable summary for $TARGET_USER"
+  log_info "Removed groups: $REMOVED_GROUPS"
+  log_info "Disabled kubeconfig files: $DISABLED_FILES"
+
+  if [[ "$SKIPPED_GROUPS" -gt 0 ]]; then
+    log_warn "Skipped groups: $SKIPPED_GROUPS"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "Dry run complete. No changes were applied."
+  else
+    log_info "User Kubernetes access has been disabled on this host."
+  fi
+}
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+main() {
+  require_root
+
+  need_cmd yq
+  need_cmd getent
+  need_cmd id
+  need_cmd grep
+  need_cmd tr
+  need_cmd mv
+  need_cmd date
+  need_cmd gpasswd
+
+  parse_args "$@"
+  validate_inputs
+
+  log_info "Using policy: $POLICY"
+  log_info "Target user: $TARGET_USER"
+
+  if [[ "$FORCE" -eq 1 ]]; then
+    log_warn "--force enabled; proceeding even if policy still contains the user"
+  fi
+
+  remove_bastion_groups
+  disable_kube_access
+  show_summary
+}
+
+main "$@"

@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-csr-approver"
+
+# --------------------------------------------------
+# Resolve bastion library location
+# --------------------------------------------------
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+source "${LIB_DIR}/audit.sh"
+
+# --------------------------------------------------
+# Defaults
+# --------------------------------------------------
+
+POLICY="${POLICY_FILE}"
+BOOTSTRAP_TOKEN_STATE_DIR="/var/lib/bastion/bootstrap-tokens"
+BOOTSTRAP_DAEMON_TOKEN_CACHE_DIR="/run/bastion-bootstrapd/tokens"
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-csr-approver [--policy FILE]
+
+Approves valid pending Kubernetes CSRs based on host user groups.
+Safe for cron execution.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --policy)
+        POLICY="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
+
+pending_csrs() {
+  kubectl get csr \
+    -l 'bastion-access=true' \
+    -o jsonpath='{range .items[?(@.status=={})]}{.metadata.name}{"\n"}{end}' \
+    2> /dev/null || true
+}
+
+csr_signer() {
+  kubectl get csr "$1" -o jsonpath='{.spec.signerName}'
+}
+
+csr_usages() {
+  kubectl get csr "$1" -o jsonpath='{.spec.usages[*]}'
+}
+
+csr_username() {
+  kubectl get csr "$1" -o jsonpath='{.spec.username}'
+}
+
+csr_request_groups() {
+  kubectl get csr "$1" -o jsonpath='{.spec.groups[*]}'
+}
+
+csr_expiration_seconds() {
+  kubectl get csr "$1" -o jsonpath='{.spec.expirationSeconds}'
+}
+
+csr_request() {
+  kubectl get csr "$1" -o jsonpath='{.spec.request}'
+}
+
+csr_subject() {
+  local req="$1"
+  echo "$req" | base64 -d | openssl req -noout -subject
+}
+
+subject_cn() {
+  sed -n 's/.*CN=\([^,/]*\).*/\1/p'
+}
+
+subject_groups() {
+  grep -o 'O=[^,/]*' | cut -d= -f2
+}
+
+user_exists() {
+  getent passwd "$1" > /dev/null 2>&1
+}
+
+user_groups() {
+  id -nG "$1"
+}
+
+approve_csr() {
+  kubectl certificate approve "$1" > /dev/null
+}
+
+bootstrap_token_owner_for_requester() {
+  local requester="$1"
+  local token_id file owner
+
+  [[ "$requester" == system:bootstrap:* ]] || return 1
+  token_id="${requester#system:bootstrap:}"
+  [[ -n "$token_id" ]] || return 1
+
+  for file in "$BOOTSTRAP_DAEMON_TOKEN_CACHE_DIR"/*.json "$BOOTSTRAP_TOKEN_STATE_DIR"/*.json; do
+    [[ -f "$file" ]] || continue
+    owner="$(jq -r --arg tokenId "$token_id" 'if .tokenId == $tokenId then (.user // "") else "" end' "$file" 2> /dev/null || true)"
+    if [[ -n "$owner" ]]; then
+      printf '%s\n' "$owner"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+has_duplicate_pending_for_requester() {
+  local csr="$1"
+  local requester="$2"
+  local dup_count
+
+  dup_count="$(kubectl get csr -l 'bastion-access=true' -o json 2> /dev/null | jq -r --arg csr "$csr" --arg requester "$requester" '
+    [
+      .items[]
+      | select(.metadata.name != $csr)
+      | select(.spec.username == $requester)
+      | select(.status.certificate == null)
+      | select((.status.conditions // []) | length == 0)
+    ]
+    | length
+  ' 2> /dev/null || echo 0)"
+
+  [[ "$dup_count" =~ ^[0-9]+$ ]] || dup_count=0
+  ((dup_count > 0))
+}
+
+# --------------------------------------------------
+# Validation Logic
+# --------------------------------------------------
+
+validate_csr() {
+  local csr="$1"
+
+  local user requester req subj cn groups host_groups valid=true signer usages requester_groups expiration token_owner
+
+  signer="$(csr_signer "$csr")"
+  usages="$(csr_usages "$csr")"
+
+  if [[ "$signer" != "$CSR_SIGNER_NAME" ]]; then
+    log_warn "DENY $csr - signer mismatch (signer=$signer expected=$CSR_SIGNER_NAME)"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=signer_mismatch signer=${signer}"
+    return 1
+  fi
+
+  if [[ "$usages" != "client auth" ]]; then
+    log_warn "DENY $csr - unsupported usages: $usages"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=bad_usages usages=${usages}"
+    return 1
+  fi
+
+  expiration="$(csr_expiration_seconds "$csr")"
+  if [[ -z "$expiration" || ! "$expiration" =~ ^[0-9]+$ ]]; then
+    log_warn "DENY $csr - invalid expirationSeconds"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=bad_expiration"
+    return 1
+  fi
+  if ((expiration < CLIENT_CERT_TTL_MIN_SECONDS || expiration > CLIENT_CERT_TTL_MAX_SECONDS)); then
+    log_warn "DENY $csr - expirationSeconds out of range ($expiration)"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=expiration_out_of_range expiration=${expiration}"
+    return 1
+  fi
+
+  requester="$(csr_username "$csr")"
+  requester_groups="$(csr_request_groups "$csr")"
+
+  req="$(csr_request "$csr")"
+  subj="$(csr_subject "$req")"
+
+  cn="$(echo "$subj" | subject_cn)"
+  groups="$(echo "$subj" | subject_groups || true)"
+
+  if [[ -z "$cn" ]]; then
+    log_warn "DENY $csr - missing subject CN"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=missing_cn requester=${requester}"
+    return 1
+  fi
+
+  if [[ "$cn" == system:* ]]; then
+    log_warn "DENY $csr - system CN not allowed: $cn"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=system_cn cn=${cn}"
+    return 1
+  fi
+
+  user="$cn"
+
+  if has_duplicate_pending_for_requester "$csr" "$requester"; then
+    log_warn "DENY $csr - duplicate pending CSR for requester"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=duplicate_pending requester=${requester}"
+    return 1
+  fi
+
+  if grep -qw "$BOOTSTRAP_AUTH_GROUP" <<< "$requester_groups"; then
+    token_owner="$(bootstrap_token_owner_for_requester "$requester" || true)"
+    if [[ -z "$token_owner" || "$token_owner" != "$cn" ]]; then
+      log_warn "DENY $csr - bootstrap token owner mismatch"
+      audit_event "csr_approve" "deny" "csr=${csr} reason=bootstrap_owner_mismatch requester=${requester} cn=${cn} owner=${token_owner:-none}"
+      return 1
+    fi
+  elif [[ "$requester" != "$cn" ]]; then
+    log_warn "DENY $csr - requester identity mismatch"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=requester_mismatch requester=${requester} cn=${cn}"
+    return 1
+  fi
+
+  if ! user_exists "$user"; then
+    log_warn "DENY $csr — CN user does not exist: $user"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=unknown_user user=${user}"
+    return 1
+  fi
+
+  if [[ -z "$groups" ]]; then
+    log_warn "DENY $csr — no groups requested"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=no_groups user=${user}"
+    return 1
+  fi
+
+  host_groups="$(user_groups "$user")"
+
+  for g in $groups; do
+    case "$g" in
+      system:masters | system:nodes | system:serviceaccounts | system:serviceaccounts:* | system:kube-* | system:node:*)
+        log_warn "DENY $csr - forbidden group requested: $g"
+        audit_event "csr_approve" "deny" "csr=${csr} reason=forbidden_group group=${g} user=${user}"
+        return 1
+        ;;
+    esac
+    [[ "$g" == "${GROUP_PREFIX}"* ]] || valid=false
+    echo "$host_groups" | grep -qw "$g" || valid=false
+  done
+
+  if [[ "$valid" != true ]]; then
+    log_warn "DENY $csr — group mismatch for $user"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=group_mismatch user=${user}"
+    return 1
+  fi
+
+  return 0
+}
+
+process_csr() {
+  local csr="$1"
+
+  log_debug "Evaluating CSR: $csr"
+
+  if validate_csr "$csr"; then
+    approve_csr "$csr"
+    log_info "APPROVED $csr"
+    audit_event "csr_approve" "ok" "csr=${csr}"
+  fi
+}
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+main() {
+  require_root
+
+  need_cmd kubectl
+  need_cmd openssl
+  need_cmd base64
+  need_cmd yq
+  need_cmd getent
+  need_cmd id
+  need_cmd jq
+  need_cmd grep
+  need_cmd sed
+
+  parse_args "$@"
+  POLICY_FILE="$POLICY"
+  policy_read
+
+  local found=0
+
+  while IFS= read -r csr; do
+    [[ -z "$csr" ]] && continue
+    found=1
+    process_csr "$csr"
+  done < <(pending_csrs)
+
+  if [[ "$found" -eq 0 ]]; then
+    log_debug "No pending CSRs"
+  fi
+}
+
+main "$@"

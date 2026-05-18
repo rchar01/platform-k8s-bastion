@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -f "/usr/local/lib/bastion/VERSION" ]]; then
+  cat "/usr/local/lib/bastion/VERSION"
+  exit 0
+fi
+
+if [[ -f "/usr/lib/bastion/VERSION" ]]; then
+  cat "/usr/lib/bastion/VERSION"
+  exit 0
+fi
+
+echo "not-installed"
+exit 1

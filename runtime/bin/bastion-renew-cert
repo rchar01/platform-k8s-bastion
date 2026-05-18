@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-renew-cert"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+source "${LIB_DIR}/audit.sh"
+source "${LIB_DIR}/state.sh"
+
+KUBE_DIR="${HOME}/.kube"
+USER_CERT_PATH="${KUBE_DIR}/user.crt"
+USER_KEY_PATH="${KUBE_DIR}/user.key"
+USER_CONFIG_PATH="${KUBE_DIR}/config"
+QUIET=0
+
+resolve_internal_cmd() {
+  local name="$1"
+
+  if [[ -x "/usr/local/lib/bastion/internal/${name}" ]]; then
+    printf '%s\n' "/usr/local/lib/bastion/internal/${name}"
+    return 0
+  fi
+
+  return 1
+}
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-renew-cert [--quiet]
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --quiet)
+        QUIET=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+write_kubeconfig_file_refs() {
+  local cluster="$1"
+  local server="$2"
+  local ca="$3"
+  local user="$4"
+  local dst="$5"
+
+  kubectl config --kubeconfig "$dst" set-cluster "$cluster" --server="$server" --certificate-authority="$ca" > /dev/null
+  kubectl config --kubeconfig "$dst" set-credentials "$user" --client-certificate="$USER_CERT_PATH" --client-key="$USER_KEY_PATH" > /dev/null
+  kubectl config --kubeconfig "$dst" set-context "$cluster" --cluster="$cluster" --user="$user" > /dev/null
+  kubectl config --kubeconfig "$dst" use-context "$cluster" > /dev/null
+}
+
+main() {
+  [[ "$EUID" -ne 0 ]] || die "Do not run as root"
+
+  need_cmd kubectl
+  need_cmd openssl
+  need_cmd yq
+  need_cmd base64
+  need_cmd jq
+  need_cmd install
+  need_cmd flock
+
+  parse_args "$@"
+
+  local kube_state_cmd
+  kube_state_cmd="$(resolve_internal_cmd bastion-kube-state || true)"
+  [[ -n "$kube_state_cmd" ]] || die "Missing bastion-kube-state internal command"
+
+  bastion_lock_acquire 15 || {
+    [[ "$QUIET" -eq 1 ]] || log_warn "Renew lock busy, skipping."
+    exit 0
+  }
+  trap 'bastion_lock_release' EXIT
+
+  local state_json state remaining
+  state_json="$("$kube_state_cmd")"
+  state="$(jq -r '.status' <<< "$state_json")"
+  remaining="$(jq -r '.remainingSeconds // 0' <<< "$state_json")"
+
+  audit_event "renew_check" "start" "state=${state} remaining=${remaining}"
+
+  case "$state" in
+    valid)
+      [[ "$QUIET" -eq 1 ]] || log_info "Renew skipped: certificate outside renew window."
+      audit_event "renew_check" "skip" "reason=outside_window"
+      exit 0
+      ;;
+    renewable) ;;
+    expired)
+      audit_event "renew_check" "blocked" "reason=expired"
+      die "Certificate expired; renewal blocked. Re-login to trigger bootstrap recovery."
+      ;;
+    missing | broken)
+      audit_event "renew_check" "blocked" "reason=${state}"
+      die "Certificate state is ${state}; renewal blocked. Re-login to trigger bootstrap recovery."
+      ;;
+    *)
+      die "Unknown state: ${state}"
+      ;;
+  esac
+
+  policy_read
+
+  local user_name prefix ttl signer
+  user_name="$(id -un)"
+  prefix="$GROUP_PREFIX"
+  ttl="$CLIENT_CERT_TTL_DEFAULT_SECONDS"
+  signer="$CSR_SIGNER_NAME"
+
+  mapfile -t groups < <(id -nG | tr ' ' '\n' | grep "^${prefix}" || true)
+  [[ "${#groups[@]}" -gt 0 ]] || die "No ${prefix}* groups found for user"
+
+  local tmp key_tmp csr_tmp cert_tmp cfg_tmp csr_name subj cert_data
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"; bastion_lock_release' EXIT
+
+  key_tmp="${tmp}/user.key"
+  csr_tmp="${tmp}/user.csr"
+  cert_tmp="${tmp}/user.crt"
+  cfg_tmp="${tmp}/config"
+
+  subj="/CN=${user_name}"
+  for g in "${groups[@]}"; do
+    subj="${subj}/O=${g}"
+  done
+
+  audit_event "renew" "start" "user=${user_name}"
+
+  openssl req -new -newkey rsa:2048 -nodes -keyout "$key_tmp" -out "$csr_tmp" -subj "$subj" > /dev/null 2>&1
+  csr_name="${user_name}-renew-$(date +%s)"
+
+  kubectl --kubeconfig="$USER_CONFIG_PATH" apply -f - > /dev/null << EOF
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: ${csr_name}
+  labels:
+    bastion-access: "true"
+spec:
+  signerName: ${signer}
+  expirationSeconds: ${ttl}
+  request: $(base64 -w0 < "$csr_tmp")
+  usages:
+  - client auth
+EOF
+
+  local elapsed=0 backoff=1 wait_timeout=300 deny_reason=""
+  cert_data=""
+  while ((elapsed < wait_timeout)); do
+    cert_data="$(kubectl --kubeconfig="$USER_CONFIG_PATH" get csr "$csr_name" -o jsonpath='{.status.certificate}' 2> /dev/null || true)"
+    [[ -n "$cert_data" ]] && break
+
+    deny_reason="$(kubectl --kubeconfig="$USER_CONFIG_PATH" get csr "$csr_name" -o jsonpath='{range .status.conditions[*]}{.type}:{.reason}:{.message}{"\n"}{end}' 2> /dev/null | grep '^Denied:' || true)"
+    if [[ -n "$deny_reason" ]]; then
+      audit_event "renew" "error" "csr=${csr_name} reason=${deny_reason}"
+      die "CSR denied: ${deny_reason}"
+    fi
+
+    sleep "$backoff"
+    elapsed=$((elapsed + backoff))
+    ((backoff < 15)) && backoff=$((backoff * 2))
+  done
+
+  [[ -n "$cert_data" ]] || {
+    audit_event "renew" "error" "csr=${csr_name} reason=timeout"
+    die "Timeout waiting for renewed certificate"
+  }
+
+  printf '%s' "$cert_data" | base64 -d > "$cert_tmp"
+
+  local cluster server ca
+  cluster="$BASTION_CLUSTER_NAME"
+  server="$BASTION_CLUSTER_SERVER"
+  ca="$BASTION_CLUSTER_CA_FILE"
+
+  write_kubeconfig_file_refs "$cluster" "$server" "$ca" "$user_name" "$cfg_tmp"
+
+  chmod 0600 "$key_tmp"
+  chmod 0644 "$cert_tmp"
+
+  mv "$key_tmp" "$USER_KEY_PATH"
+  mv "$cert_tmp" "$USER_CERT_PATH"
+  mv "$cfg_tmp" "$USER_CONFIG_PATH"
+  chmod 0600 "$USER_KEY_PATH" "$USER_CONFIG_PATH"
+  chmod 0644 "$USER_CERT_PATH"
+
+  kubectl --kubeconfig="$USER_CONFIG_PATH" delete csr "$csr_name" > /dev/null 2>&1 || true
+  audit_event "renew" "ok" "csr=${csr_name}"
+
+  if [[ "$QUIET" -eq 0 ]]; then
+    log_info "Kubernetes certificate renewed successfully."
+  fi
+}
+
+main "$@"

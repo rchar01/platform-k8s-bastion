@@ -1,0 +1,54 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
+and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.0] - 2026-05-18
+
+### Added
+
+- Add runtime-only repository layout under `runtime/`.
+- Add `runtime/VERSION` with initial runtime version `1.0.0`.
+- Add `runtime/install-manifest.yml` as the install contract consumed by
+  `platform-config` Ansible.
+- Add public user commands under `runtime/bin/`:
+  `bastion-renew-cert`, `bastion-kubeconfig-expiry`, and `bastion-version`.
+- Add internal helper commands under `runtime/internal-bin/` for login bootstrap,
+  daemon client access, kube state inspection, and certificate enrollment.
+- Add admin/operator commands under `runtime/sbin/` for user bootstrap, admin
+  kubeconfig bootstrap, token issue/revoke, CSR approval/cleanup, cluster status,
+  certificate renewal, auditing, and user disablement.
+- Add shared shell libraries under `runtime/lib/` and Python daemon modules under
+  `runtime/lib/python/`.
+- Add lightweight runtime metadata checks with `make test`.
+- Add shell formatting and lint targets with `make check-shell`,
+  `make fmt-shell-check`, and `make lint-shell`.
+
+### Changed
+
+- Define `platform-k8s-bastion` as a runtime artifact source, not a host
+  installer.
+- Move host installation responsibility to `platform-config`, including OS
+  packages, external CLI downloads, `/etc/bastion` inputs, login profile
+  rendering, systemd unit management, and Ansible smoke tests.
+- Treat `runtime/install-manifest.yml` as the source of truth for runtime command
+  installation and command visibility in `platform-config`.
+- Keep runtime command visibility lists in Ansible-generated profile data instead
+  of separate runtime text files.
+- Document that private non-secret configuration belongs in `platform-private`
+  and secret material belongs outside Git.
+
+### Removed
+
+- Remove direct host install, download, Podman fixture, and live-cluster workflow
+  ownership from this repository.
+- Remove legacy direct installer assets such as `download.sh`, `download.conf`,
+  public `access-policy.yaml`, `justfile`, and obsolete direct test lanes.
+- Remove runtime-owned `user-tools.txt` and `admin-tools.txt`; `platform-config`
+  now renders profile tool visibility from Ansible variables and the manifest.
+- Remove obsolete documentation that described host installation workflows now
+  owned by `platform-config`.

@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROGRAM_NAME="bastion-enroll-cert"
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+  [[ -f /usr/local/lib/bastion/log.sh ]] && {
+    echo /usr/local/lib/bastion
+    return
+  }
+  [[ -f /usr/lib/bastion/log.sh ]] && {
+    echo /usr/lib/bastion
+    return
+  }
+  [[ -f "${script_dir}/../lib/log.sh" ]] && {
+    echo "${script_dir}/../lib"
+    return
+  }
+  [[ -f /bastion/lib/log.sh ]] && {
+    echo "/bastion/lib"
+    return
+  }
+
+  echo "bastion library not found" >&2
+  exit 1
+}
+
+LIB_DIR="$(resolve_lib_dir)"
+
+source "${LIB_DIR}/log.sh"
+source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/contract.sh"
+source "${LIB_DIR}/policy.sh"
+source "${LIB_DIR}/audit.sh"
+
+BOOTSTRAP_KUBECONFIG="${HOME}/.kube/bootstrap"
+KUBE_DIR="${HOME}/.kube"
+USER_CERT_PATH="${KUBE_DIR}/user.crt"
+USER_KEY_PATH="${KUBE_DIR}/user.key"
+USER_CONFIG_PATH="${KUBE_DIR}/config"
+
+REASON="manual-recovery"
+
+usage() {
+  cat << EOF
+Usage:
+  bastion-enroll-cert [--reason REASON]
+
+Enrolls user cert using bootstrap kubeconfig.
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --reason)
+        REASON="$2"
+        shift 2
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+  done
+}
+
+write_kubeconfig_file_refs() {
+  local cluster="$1"
+  local server="$2"
+  local ca="$3"
+  local user="$4"
+  local dst="$5"
+
+  kubectl config --kubeconfig "$dst" set-cluster "$cluster" --server="$server" --certificate-authority="$ca" > /dev/null
+  kubectl config --kubeconfig "$dst" set-credentials "$user" --client-certificate="$USER_CERT_PATH" --client-key="$USER_KEY_PATH" > /dev/null
+  kubectl config --kubeconfig "$dst" set-context "$cluster" --cluster="$cluster" --user="$user" > /dev/null
+  kubectl config --kubeconfig "$dst" use-context "$cluster" > /dev/null
+}
+
+main() {
+  [[ "$EUID" -ne 0 ]] || die "Do not run as root"
+
+  need_cmd kubectl
+  need_cmd openssl
+  need_cmd yq
+  need_cmd base64
+  need_cmd id
+  need_cmd mktemp
+
+  parse_args "$@"
+
+  [[ -f "$BOOTSTRAP_KUBECONFIG" ]] || die "Missing bootstrap kubeconfig: $BOOTSTRAP_KUBECONFIG"
+  policy_read
+
+  local user_name prefix ttl signer
+  user_name="$(id -un)"
+  prefix="$GROUP_PREFIX"
+  ttl="$CLIENT_CERT_TTL_DEFAULT_SECONDS"
+  signer="$CSR_SIGNER_NAME"
+
+  mapfile -t groups < <(id -nG | tr ' ' '\n' | grep "^${prefix}" || true)
+  [[ "${#groups[@]}" -gt 0 ]] || die "No ${prefix}* groups found for user"
+
+  local tmp key_tmp csr_tmp cert_tmp csr_name subj cert_data
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  key_tmp="${tmp}/user.key"
+  csr_tmp="${tmp}/user.csr"
+  cert_tmp="${tmp}/user.crt"
+
+  subj="/CN=${user_name}"
+  for g in "${groups[@]}"; do
+    subj="${subj}/O=${g}"
+  done
+
+  audit_event "bootstrap_enroll" "start" "user=${user_name} reason=${REASON}"
+
+  openssl req -new -newkey rsa:2048 -nodes -keyout "$key_tmp" -out "$csr_tmp" -subj "$subj" > /dev/null 2>&1
+  csr_name="${user_name}-$(date +%s)"
+
+  kubectl --kubeconfig="$BOOTSTRAP_KUBECONFIG" apply -f - > /dev/null << EOF
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: ${csr_name}
+  labels:
+    bastion-access: "true"
+spec:
+  signerName: ${signer}
+  expirationSeconds: ${ttl}
+  request: $(base64 -w0 < "$csr_tmp")
+  usages:
+  - client auth
+EOF
+
+  audit_event "csr_submit" "ok" "user=${user_name} csr=${csr_name} mode=bootstrap"
+
+  local elapsed=0 backoff=1 wait_timeout=300 deny_reason=""
+  cert_data=""
+  while ((elapsed < wait_timeout)); do
+    cert_data="$(kubectl --kubeconfig="$BOOTSTRAP_KUBECONFIG" get csr "$csr_name" -o jsonpath='{.status.certificate}' 2> /dev/null || true)"
+    [[ -n "$cert_data" ]] && break
+
+    deny_reason="$(kubectl --kubeconfig="$BOOTSTRAP_KUBECONFIG" get csr "$csr_name" -o jsonpath='{range .status.conditions[*]}{.type}:{.reason}:{.message}{"\n"}{end}' 2> /dev/null | grep '^Denied:' || true)"
+    if [[ -n "$deny_reason" ]]; then
+      audit_event "csr_wait" "denied" "user=${user_name} csr=${csr_name} reason=${deny_reason}"
+      die "CSR denied: ${deny_reason}"
+    fi
+
+    sleep "$backoff"
+    elapsed=$((elapsed + backoff))
+    ((backoff < 15)) && backoff=$((backoff * 2))
+  done
+
+  [[ -n "$cert_data" ]] || {
+    audit_event "csr_wait" "timeout" "user=${user_name} csr=${csr_name} waited=${elapsed}s"
+    die "Timeout waiting for signed certificate"
+  }
+
+  printf '%s' "$cert_data" | base64 -d > "$cert_tmp"
+
+  install -d -m 0700 "$KUBE_DIR"
+  chmod 0600 "$key_tmp"
+  chmod 0644 "$cert_tmp"
+
+  local cfg_tmp
+  cfg_tmp="${tmp}/config"
+
+  local cluster server ca
+  cluster="$BASTION_CLUSTER_NAME"
+  server="$BASTION_CLUSTER_SERVER"
+  ca="$BASTION_CLUSTER_CA_FILE"
+
+  write_kubeconfig_file_refs "$cluster" "$server" "$ca" "$user_name" "$cfg_tmp"
+
+  mv "$key_tmp" "$USER_KEY_PATH"
+  mv "$cert_tmp" "$USER_CERT_PATH"
+  mv "$cfg_tmp" "$USER_CONFIG_PATH"
+  chmod 0600 "$USER_KEY_PATH" "$USER_CONFIG_PATH"
+  chmod 0644 "$USER_CERT_PATH"
+
+  rm -f "$BOOTSTRAP_KUBECONFIG"
+  kubectl --kubeconfig="$USER_CONFIG_PATH" delete csr "$csr_name" > /dev/null 2>&1 || true
+
+  audit_event "bootstrap_enroll" "ok" "user=${user_name} csr=${csr_name}"
+  log_info "Kubernetes certificate enrolled successfully."
+}
+
+main "$@"
