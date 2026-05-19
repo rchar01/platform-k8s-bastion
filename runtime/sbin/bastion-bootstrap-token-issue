@@ -39,6 +39,7 @@ source "${LIB_DIR}/audit.sh"
 ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG_FILE}"
 ISSUER_SERVICE_NAME="bastion-token-issuer"
 ISSUER_SERVICE_PORT_NAME="http"
+BOOTSTRAP_TOKEN_STATE_DIR="/var/lib/bastion/bootstrap-tokens"
 
 TARGET_USER=""
 REASON="manual-recovery"
@@ -120,6 +121,45 @@ issuer_post() {
   kubectl --kubeconfig "$ADMIN_KUBECONFIG" create --raw "$raw_path" -f "$body_file"
 }
 
+revoke_token_best_effort() {
+  local token_id="$1"
+  local revoke_req
+
+  [[ -n "$token_id" ]] || return 0
+
+  revoke_req="$(mktemp)"
+  jq -n --arg tokenId "$token_id" '{tokenId: $tokenId}' > "$revoke_req"
+  issuer_post "/v1/bootstrap-token/revoke" "$revoke_req" > /dev/null 2>&1 || true
+  rm -f "$revoke_req"
+}
+
+write_token_state() {
+  local token_id="$1"
+  local expires_at="$2"
+  local user_uid dst tmp
+
+  user_uid="$(id -u "$TARGET_USER")" || return 1
+  install -m 0700 -d "$BOOTSTRAP_TOKEN_STATE_DIR" || return 1
+
+  dst="${BOOTSTRAP_TOKEN_STATE_DIR}/${user_uid}.json"
+  tmp="$(mktemp "${BOOTSTRAP_TOKEN_STATE_DIR}/.${user_uid}.XXXXXX")" || return 1
+
+  if ! jq -n \
+    --arg user "$TARGET_USER" \
+    --argjson uid "$user_uid" \
+    --arg tokenId "$token_id" \
+    --arg expiresAt "$expires_at" \
+    '{user: $user, uid: $uid, tokenId: $tokenId, expiresAt: $expiresAt}' > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if ! chmod 0600 "$tmp" || ! mv -T "$tmp" "$dst"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 main() {
   require_root
 
@@ -127,6 +167,11 @@ main() {
   need_cmd jq
   need_cmd mktemp
   need_cmd getent
+  need_cmd chmod
+  need_cmd id
+  need_cmd install
+  need_cmd mv
+  need_cmd rm
 
   policy_read
   TTL_SECONDS="$BOOTSTRAP_TOKEN_TTL_DEFAULT_SECONDS"
@@ -158,6 +203,12 @@ main() {
   [[ -n "$token_id" ]] || die "Issuer response missing tokenId"
   [[ -n "$expires_at" ]] || die "Issuer response missing expiresAt"
   [[ -n "$bootstrap_kubeconfig" ]] || die "Issuer response missing bootstrapKubeconfig"
+
+  if ! write_token_state "$token_id" "$expires_at"; then
+    revoke_token_best_effort "$token_id"
+    audit_event "bootstrap_token_issue" "error" "user=${TARGET_USER} reason=state_write_failed"
+    die "Failed to record bootstrap token ownership"
+  fi
 
   audit_event "bootstrap_token_issue" "ok" "user=${TARGET_USER} token_id=${token_id}"
 

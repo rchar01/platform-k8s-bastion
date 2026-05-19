@@ -11,7 +11,6 @@ MANIFEST="${RUNTIME_DIR}/install-manifest.yml"
 }
 
 required_files=(
-  VERSION
   lib/common.sh
   lib/log.sh
   lib/contract.sh
@@ -43,7 +42,7 @@ manifest_section_files() {
   ' "$MANIFEST"
 }
 
-for section in publicCommands internalCommands adminCommands; do
+for section in publicCommands internalCommands adminCommands runtimeMetadata; do
   source_dir="$(manifest_section_value "$section" sourceDir)"
   [[ -n "$source_dir" ]] || {
     printf 'Missing sourceDir for manifest section: %s\n' "$section" >&2

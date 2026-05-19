@@ -38,6 +38,7 @@ source "${LIB_DIR}/audit.sh"
 ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG_FILE}"
 ISSUER_SERVICE_NAME="bastion-token-issuer"
 ISSUER_SERVICE_PORT_NAME="http"
+BOOTSTRAP_TOKEN_STATE_DIR="/var/lib/bastion/bootstrap-tokens"
 
 TOKEN_ID=""
 BEST_EFFORT=0
@@ -93,12 +94,24 @@ issuer_post() {
   kubectl --kubeconfig "$ADMIN_KUBECONFIG" create --raw "$raw_path" -f "$body_file"
 }
 
+remove_token_state() {
+  local file
+
+  for file in "$BOOTSTRAP_TOKEN_STATE_DIR"/*.json; do
+    [[ -f "$file" ]] || continue
+    if jq -e --arg tokenId "$TOKEN_ID" '.tokenId == $tokenId' "$file" > /dev/null 2>&1; then
+      rm -f -- "$file"
+    fi
+  done
+}
+
 main() {
   require_root
 
   need_cmd kubectl
   need_cmd jq
   need_cmd mktemp
+  need_cmd rm
 
   parse_args "$@"
   [[ -f "$ADMIN_KUBECONFIG" ]] || die "Admin kubeconfig not found: $ADMIN_KUBECONFIG"
@@ -119,6 +132,7 @@ main() {
     die "Issuer revoke failed: $(tr '\n' ' ' < "$err_file")"
   fi
 
+  remove_token_state
   audit_event "bootstrap_token_revoke" "ok" "token_id=${TOKEN_ID}"
 }
 

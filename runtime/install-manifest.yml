@@ -48,6 +48,13 @@ adminCommands:
     - bastion-csr-cleanup
     - bastion-disable-user
 
+runtimeMetadata:
+  mode: "0644"
+  sourceDir: .
+  destination: /usr/local/lib/bastion
+  files:
+    - VERSION
+
 libraries:
   mode: "0644"
   sourceDir: lib

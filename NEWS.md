@@ -2,6 +2,15 @@
 
 This file gives a short, release-oriented view of what changed between versions.
 
+## Unreleased
+
+Runtime correctness and bootstrap hardening updates.
+
+Highlights:
+
+- Bootstrap token ownership is now recorded by token issue/revoke commands.
+- The install manifest now includes `runtime/VERSION` for `bastion-version`.
+
 ## v1.0.1 - 2026-05-18
 
 Documentation and branding update.

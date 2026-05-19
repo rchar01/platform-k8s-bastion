@@ -7,6 +7,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Record bootstrap token ownership in the token issue/revoke commands so direct
+  token issuance can be matched by the CSR approver.
+- Include `runtime/VERSION` in the install manifest contract used by
+  `bastion-version`.
+
 ## [1.0.1] - 2026-05-18
 
 ### Added
