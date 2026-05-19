@@ -4,6 +4,15 @@ This file gives a short, release-oriented view of what changed between versions.
 
 ## Unreleased
 
+## v1.1.2 - 2026-05-19
+
+Token cache and audit redaction update.
+
+Highlights:
+
+- Bootstrap token IDs are now redacted from audit and login state output while
+  root-only token ownership caches remain available for CSR validation.
+
 ## v1.1.1 - 2026-05-19
 
 Runtime security hardening update.

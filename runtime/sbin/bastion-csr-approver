@@ -113,6 +113,16 @@ user_groups() {
   id -nG "$1"
 }
 
+audit_requester() {
+  local requester="$1"
+
+  if [[ "$requester" == system:bootstrap:* ]]; then
+    printf '%s\n' 'system:bootstrap:<redacted>'
+  else
+    printf '%s\n' "$requester"
+  fi
+}
+
 approve_csr() {
   local csr="$1"
   local validated_json="$2"
@@ -207,7 +217,7 @@ validate_csr() {
   local csr="$1"
   local csr_data="$2"
 
-  local user requester req subj cn groups host_groups valid=true signer usages requester_groups expiration token_owner uid
+  local user requester requester_audit req subj cn groups host_groups valid=true signer usages requester_groups expiration token_owner uid
 
   uid="$(jq -r '.metadata.uid // ""' <<< "$csr_data")"
   signer="$(jq -r '.spec.signerName // ""' <<< "$csr_data")"
@@ -238,6 +248,7 @@ validate_csr() {
   fi
 
   requester="$(jq -r '.spec.username // ""' <<< "$csr_data")"
+  requester_audit="$(audit_requester "$requester")"
   requester_groups="$(jq -r '.spec.groups // [] | join(" ")' <<< "$csr_data")"
 
   req="$(jq -r '.spec.request // ""' <<< "$csr_data")"
@@ -248,7 +259,7 @@ validate_csr() {
 
   if [[ -z "$cn" ]]; then
     log_warn "DENY $csr - missing subject CN"
-    audit_event "csr_approve" "deny" "csr=${csr} reason=missing_cn requester=${requester}"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=missing_cn requester=${requester_audit}"
     return 1
   fi
 
@@ -262,7 +273,7 @@ validate_csr() {
 
   if has_duplicate_pending_for_requester "$uid" "$requester"; then
     log_warn "DENY $csr - duplicate pending CSR for requester"
-    audit_event "csr_approve" "deny" "csr=${csr} reason=duplicate_pending requester=${requester}"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=duplicate_pending requester=${requester_audit}"
     return 1
   fi
 
@@ -270,12 +281,12 @@ validate_csr() {
     token_owner="$(bootstrap_token_owner_for_requester "$requester" || true)"
     if [[ -z "$token_owner" || "$token_owner" != "$cn" ]]; then
       log_warn "DENY $csr - bootstrap token owner mismatch"
-      audit_event "csr_approve" "deny" "csr=${csr} reason=bootstrap_owner_mismatch requester=${requester} cn=${cn} owner=${token_owner:-none}"
+      audit_event "csr_approve" "deny" "csr=${csr} reason=bootstrap_owner_mismatch requester=${requester_audit} cn=${cn} owner=${token_owner:-none}"
       return 1
     fi
   elif [[ "$requester" != "$cn" ]]; then
     log_warn "DENY $csr - requester identity mismatch"
-    audit_event "csr_approve" "deny" "csr=${csr} reason=requester_mismatch requester=${requester} cn=${cn}"
+    audit_event "csr_approve" "deny" "csr=${csr} reason=requester_mismatch requester=${requester_audit} cn=${cn}"
     return 1
   fi
 

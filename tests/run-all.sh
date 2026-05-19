@@ -14,6 +14,7 @@ run_test() {
 main() {
   run_test "Runtime install manifest" "${SCRIPT_DIR}/scenarios/test-install-manifest.sh"
   run_test "Policy lookup and audit JSON safety" "${SCRIPT_DIR}/scenarios/test-policy-audit-safety.sh"
+  run_test "Token cache safety" "${SCRIPT_DIR}/scenarios/test-token-cache-safety.sh"
   run_test "CSR cleanup selector" "${SCRIPT_DIR}/scenarios/test-csr-cleanup-selector.sh"
   run_test "CSR approval race hardening" "${SCRIPT_DIR}/scenarios/test-csr-approver-approval-race.sh"
   printf '==> Kubeconfig writer unit tests\n'

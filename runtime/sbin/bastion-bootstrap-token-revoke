@@ -124,9 +124,9 @@ main() {
   trap 'rm -f "$req" "$err_file"' EXIT
   jq -n --arg tokenId "$TOKEN_ID" '{tokenId: $tokenId}' > "$req"
 
-  audit_event "bootstrap_token_revoke" "start" "token_id=${TOKEN_ID}"
+  audit_event "bootstrap_token_revoke" "start" "token_id_redacted=true"
   if ! issuer_post "/v1/bootstrap-token/revoke" "$req" > /dev/null 2> "$err_file"; then
-    audit_event "bootstrap_token_revoke" "error" "token_id=${TOKEN_ID}"
+    audit_event "bootstrap_token_revoke" "error" "token_id_redacted=true"
     if [[ "$BEST_EFFORT" -eq 1 ]]; then
       log_warn "Issuer revoke failed (best-effort): $(tr '\n' ' ' < "$err_file")"
       exit 0
@@ -135,7 +135,7 @@ main() {
   fi
 
   remove_token_state
-  audit_event "bootstrap_token_revoke" "ok" "token_id=${TOKEN_ID}"
+  audit_event "bootstrap_token_revoke" "ok" "token_id_redacted=true"
 }
 
 main "$@"

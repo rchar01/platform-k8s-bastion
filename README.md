@@ -99,7 +99,7 @@ are intended to be pinned by `platform-config` as a git submodule tag, for
 example:
 
 ```bash
-git -C vendor/platform-k8s-bastion checkout v1.1.1
+git -C vendor/platform-k8s-bastion checkout v1.1.2
 ```
 
 When a tag changes installed runtime behavior, `runtime/VERSION` should match

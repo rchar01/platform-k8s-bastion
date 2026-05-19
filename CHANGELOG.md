@@ -7,6 +7,13 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-05-19
+
+### Fixed
+
+- Redact bootstrap token IDs from runtime audit and login state files while
+  retaining root-only ownership caches for CSR owner validation.
+
 ## [1.1.1] - 2026-05-19
 
 ### Fixed

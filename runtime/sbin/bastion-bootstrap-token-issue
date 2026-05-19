@@ -214,7 +214,7 @@ main() {
     die "Failed to record bootstrap token ownership"
   fi
 
-  audit_event "bootstrap_token_issue" "ok" "user=${TARGET_USER} token_id=${token_id}"
+  audit_event "bootstrap_token_issue" "ok" "user=${TARGET_USER} token_id_redacted=true"
 
   if [[ "$OUTPUT_JSON" -eq 1 ]]; then
     jq -n \

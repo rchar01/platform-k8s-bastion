@@ -104,7 +104,8 @@ update_state() {
       certStatus: $status,
       lastError: $err,
       lastCsrName: (if $csr == "" then ($base.lastCsrName // "") else $csr end),
-      lastTokenId: (if $token == "" then ($base.lastTokenId // "") else $token end),
+      lastTokenId: "",
+      lastTokenIdRedacted: (if $token == "" then ($base.lastTokenIdRedacted // false) else true end),
       certNotAfter: (if $certNotAfter == "" then ($base.certNotAfter // "") else $certNotAfter end),
       lastBootstrapAt: (if $status == "enrolled" then $now else ($base.lastBootstrapAt // "") end),
       lastBootstrapAttemptAt: $now,
@@ -203,7 +204,7 @@ main() {
   state_json="$("$kube_state_cmd")"
   cert_not_after="$(jq -r '.certNotAfter // ""' <<< "$state_json")"
   update_state "enrolled" "" "" "$token_id" "$cert_not_after"
-  audit_event "login_bootstrap" "ok" "token_id=${token_id}"
+  audit_event "login_bootstrap" "ok" "token_id_redacted=true"
 
   [[ "$QUIET" -eq 1 ]] || printf '%s\n' "Kubernetes certificate enrolled successfully."
 }
