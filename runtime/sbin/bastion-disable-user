@@ -87,10 +87,12 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --user)
+        require_arg "$1" "${2-}"
         TARGET_USER="$2"
         shift 2
         ;;
       --policy)
+        require_arg "$1" "${2-}"
         POLICY="$2"
         shift 2
         ;;

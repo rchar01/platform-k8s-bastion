@@ -56,11 +56,35 @@ test_daemon_connection_handling_is_bounded() {
   fi
 }
 
+test_required_option_values_fail_cleanly() {
+  local tmp
+
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+
+  if (require_arg "--policy" "") 2> "$tmp"; then
+    printf 'require_arg accepted an empty option value\n' >&2
+    exit 1
+  fi
+
+  grep -q 'Missing value for --policy' "$tmp" || {
+    printf 'require_arg did not emit controlled missing-value error\n' >&2
+    exit 1
+  }
+
+  if (require_arg "--policy" "--other") 2> "$tmp"; then
+    printf 'require_arg accepted another option as a value\n' >&2
+    exit 1
+  fi
+}
+
 source "${ROOT_DIR}/runtime/lib/audit.sh"
+source "${ROOT_DIR}/runtime/lib/common.sh"
 
 test_policy_user_lookups_are_indexed
 test_audit_event_json_escapes_details
 test_login_bootstrap_uses_private_temp_files
 test_daemon_connection_handling_is_bounded
+test_required_option_values_fail_cleanly
 
 printf 'Policy lookup and audit JSON safety check passed\n'

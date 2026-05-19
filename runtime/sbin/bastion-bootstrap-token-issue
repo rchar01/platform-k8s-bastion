@@ -66,14 +66,17 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --user)
+        require_arg "$1" "${2-}"
         TARGET_USER="$2"
         shift 2
         ;;
       --reason)
+        require_arg "$1" "${2-}"
         REASON="$2"
         shift 2
         ;;
       --ttl-seconds)
+        require_arg "$1" "${2-}"
         TTL_SECONDS="$2"
         shift 2
         ;;
@@ -82,6 +85,7 @@ parse_args() {
         shift
         ;;
       --admin-kubeconfig)
+        require_arg "$1" "${2-}"
         ADMIN_KUBECONFIG="$2"
         shift 2
         ;;

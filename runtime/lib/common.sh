@@ -29,3 +29,10 @@ need_cmd() {
     exit 1
   }
 }
+
+require_arg() {
+  local opt="$1"
+  local value="${2:-}"
+
+  [[ -n "$value" && "$value" != --* ]] || die "Missing value for ${opt}"
+}

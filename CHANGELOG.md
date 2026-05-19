@@ -16,6 +16,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Use indexed policy lookups for usernames and emit audit events as escaped JSON.
 - Bound bootstrap daemon connection handling and avoid fixed `/tmp` login
   bootstrap diagnostic paths.
+- Return controlled errors for runtime options that are missing required values.
 
 ## [1.0.1] - 2026-05-18
 

@@ -13,6 +13,7 @@ Highlights:
 - Policy username lookups and audit event JSON handling are now safer.
 - Bootstrap daemon concurrency is bounded and login bootstrap diagnostics no
   longer use fixed `/tmp` paths.
+- Runtime commands now report missing option values consistently.
 
 ## v1.0.1 - 2026-05-18
 
