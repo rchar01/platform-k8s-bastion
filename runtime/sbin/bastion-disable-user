@@ -117,7 +117,7 @@ parse_args() {
 
 policy_has_user() {
   local user="$1"
-  yq -e ".users.${user}" "$POLICY" > /dev/null 2>&1
+  USER_KEY="$user" yq -e '.users[strenv(USER_KEY)]' "$POLICY" > /dev/null 2>&1
 }
 
 validate_inputs() {

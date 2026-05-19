@@ -10,6 +10,7 @@ Highlights:
 
 - Bootstrap token ownership is now recorded by token issue/revoke commands.
 - The install manifest now includes `runtime/VERSION` for `bastion-version`.
+- Policy username lookups and audit event JSON handling are now safer.
 
 ## v1.0.1 - 2026-05-18
 

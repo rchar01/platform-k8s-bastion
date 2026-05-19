@@ -131,10 +131,7 @@ ensure_all_groups() {
 get_user_groups() {
   local user="$1"
 
-  yq -r "
-    (.users.${user}.ensureGroups // [])
-    | .[]
-  " "$POLICY" 2> /dev/null || true
+  USER_KEY="$user" yq -r '(.users[strenv(USER_KEY)].ensureGroups // []) | .[]' "$POLICY" 2> /dev/null || true
 }
 
 process_users() {

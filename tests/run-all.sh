@@ -13,6 +13,7 @@ run_test() {
 
 main() {
   run_test "Runtime install manifest" "${SCRIPT_DIR}/scenarios/test-install-manifest.sh"
+  run_test "Policy lookup and audit JSON safety" "${SCRIPT_DIR}/scenarios/test-policy-audit-safety.sh"
 }
 
 main "$@"

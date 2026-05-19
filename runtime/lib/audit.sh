@@ -11,7 +11,14 @@ audit_event() {
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   actor="${SUDO_USER:-${USER:-unknown}}"
 
-  line="{\"ts\":\"${ts}\",\"program\":\"${PROGRAM_NAME:-unknown}\",\"action\":\"${action}\",\"outcome\":\"${outcome}\",\"actor\":\"${actor}\",\"details\":\"${details}\"}"
+  line="$(jq -nc \
+    --arg ts "$ts" \
+    --arg program "${PROGRAM_NAME:-unknown}" \
+    --arg action "$action" \
+    --arg outcome "$outcome" \
+    --arg actor "$actor" \
+    --arg details "$details" \
+    '{ts: $ts, program: $program, action: $action, outcome: $outcome, actor: $actor, details: $details}')"
 
   logger -t "${PROGRAM_NAME:-bastion}" -- "$line" || true
 

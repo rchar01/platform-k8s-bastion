@@ -92,6 +92,7 @@ main() {
   need_cmd yq
   need_cmd base64
   need_cmd id
+  need_cmd jq
   need_cmd mktemp
 
   parse_args "$@"
