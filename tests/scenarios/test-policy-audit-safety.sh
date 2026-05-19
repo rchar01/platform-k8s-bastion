@@ -78,6 +78,43 @@ test_required_option_values_fail_cleanly() {
   fi
 }
 
+test_csr_cleanup_selects_approved_csrs_only() {
+  grep -q 'any(.status.conditions\[\]?; .type == "Approved")' "${ROOT_DIR}/runtime/sbin/bastion-csr-cleanup" || {
+    printf 'CSR cleanup does not restrict deletion to approved CSRs\n' >&2
+    exit 1
+  }
+}
+
+test_kubeconfig_expiry_help_and_validation() {
+  local script tmp
+
+  script="${ROOT_DIR}/runtime/bin/bastion-kubeconfig-expiry"
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+
+  "$script" --help > "$tmp"
+  grep -q 'bastion-kubeconfig-expiry \[FILE|DIR\]' "$tmp" || {
+    printf 'bastion-kubeconfig-expiry help output is missing expected usage\n' >&2
+    exit 1
+  }
+
+  if WARN_DAYS=abc "$script" --help > /dev/null; then
+    :
+  else
+    printf 'bastion-kubeconfig-expiry --help should not validate WARN_DAYS\n' >&2
+    exit 1
+  fi
+
+  if WARN_DAYS=abc "$script" /nonexistent > "$tmp" 2>&1; then
+    printf 'bastion-kubeconfig-expiry accepted invalid WARN_DAYS\n' >&2
+    exit 1
+  fi
+  grep -q 'WARN_DAYS must be integer' "$tmp" || {
+    printf 'bastion-kubeconfig-expiry did not emit controlled WARN_DAYS error\n' >&2
+    exit 1
+  }
+}
+
 source "${ROOT_DIR}/runtime/lib/audit.sh"
 source "${ROOT_DIR}/runtime/lib/common.sh"
 
@@ -86,5 +123,7 @@ test_audit_event_json_escapes_details
 test_login_bootstrap_uses_private_temp_files
 test_daemon_connection_handling_is_bounded
 test_required_option_values_fail_cleanly
+test_csr_cleanup_selects_approved_csrs_only
+test_kubeconfig_expiry_help_and_validation
 
 printf 'Policy lookup and audit JSON safety check passed\n'

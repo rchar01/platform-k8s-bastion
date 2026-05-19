@@ -17,6 +17,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Bound bootstrap daemon connection handling and avoid fixed `/tmp` login
   bootstrap diagnostic paths.
 - Return controlled errors for runtime options that are missing required values.
+- Restrict CSR cleanup to approved CSRs and improve `bastion-kubeconfig-expiry`
+  help and `WARN_DAYS` validation.
 
 ## [1.0.1] - 2026-05-18
 

@@ -14,6 +14,8 @@ Highlights:
 - Bootstrap daemon concurrency is bounded and login bootstrap diagnostics no
   longer use fixed `/tmp` paths.
 - Runtime commands now report missing option values consistently.
+- CSR cleanup now matches its approved-only contract, and kubeconfig expiry help
+  and warning-day validation are stricter.
 
 ## v1.0.1 - 2026-05-18
 

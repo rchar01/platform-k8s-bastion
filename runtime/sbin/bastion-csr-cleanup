@@ -105,6 +105,7 @@ expired_csrs() {
       .items[]
       | select(.metadata.labels["bastion-access"] == "true")
       | select(.spec.signerName == $signer)
+      | select(any(.status.conditions[]?; .type == "Approved"))
       | . as $csr
       | (
           (.metadata.creationTimestamp | fromdateiso8601)
