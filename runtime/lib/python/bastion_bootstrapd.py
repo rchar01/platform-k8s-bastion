@@ -12,6 +12,7 @@ import grp
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import tempfile
@@ -207,39 +208,97 @@ class BootstrapDaemon:
         if path.exists():
             path.unlink(missing_ok=True)
 
+    def revoke_token_best_effort(self, token_id: str) -> None:
+        if not token_id:
+            return
+        try:
+            run_cmd(
+                [
+                    "/usr/local/sbin/bastion-bootstrap-token-revoke",
+                    "--token-id",
+                    token_id,
+                    "--best-effort",
+                ],
+                timeout_seconds=self.request_timeout,
+            )
+        except Exception:
+            pass
+
     def write_bootstrap_file(self, user: pwd.struct_passwd, kubeconfig: str) -> str:
         home = Path(user.pw_dir)
-        if not home.is_dir():
-            raise DaemonError("home_not_found")
-        if home.is_symlink():
-            raise DaemonError("home_symlink_not_allowed")
+        home_fd: int | None = None
+        kube_fd: int | None = None
+        fd: int | None = None
+        tmp_name = ""
 
-        kube_dir = home / ".kube"
-        if kube_dir.exists() and kube_dir.is_symlink():
-            raise DaemonError("kube_dir_symlink_not_allowed")
-        kube_dir.mkdir(mode=0o700, exist_ok=True)
-        os.chown(kube_dir, user.pw_uid, user.pw_gid)
-        os.chmod(kube_dir, 0o700)
+        if not str(home).startswith("/home/"):
+            raise DaemonError("home_not_allowed")
 
-        bootstrap_path = kube_dir / "bootstrap"
-        fd, tmp_name = tempfile.mkstemp(prefix="bootstrap.", dir=str(kube_dir))
         try:
+            home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError as exc:
+            raise DaemonError("home_not_found") from exc
+        except OSError as exc:
+            raise DaemonError("home_not_safe") from exc
+
+        try:
+            home_stat = os.fstat(home_fd)
+            if not stat.S_ISDIR(home_stat.st_mode):
+                raise DaemonError("home_not_directory")
+            if home_stat.st_uid != user.pw_uid:
+                raise DaemonError("home_owner_mismatch")
+
+            try:
+                os.mkdir(".kube", mode=0o700, dir_fd=home_fd)
+            except FileExistsError:
+                pass
+
+            try:
+                kube_fd = os.open(".kube", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
+            except OSError as exc:
+                raise DaemonError("kube_dir_not_safe") from exc
+
+            kube_stat = os.fstat(kube_fd)
+            if not stat.S_ISDIR(kube_stat.st_mode):
+                raise DaemonError("kube_dir_not_directory")
+            if kube_stat.st_uid not in (0, user.pw_uid):
+                raise DaemonError("kube_dir_owner_mismatch")
+
+            os.fchown(kube_fd, user.pw_uid, user.pw_gid)
+            os.fchmod(kube_fd, 0o700)
+
+            tmp_name = f".bootstrap.{uuid.uuid4().hex}.tmp"
+            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=kube_fd)
+            os.fchown(fd, user.pw_uid, user.pw_gid)
+            os.fchmod(fd, 0o600)
+
             with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                fd = None
                 fp.write(kubeconfig)
                 if not kubeconfig.endswith("\n"):
                     fp.write("\n")
                 fp.flush()
                 os.fsync(fp.fileno())
-            os.chown(tmp_name, user.pw_uid, user.pw_gid)
-            os.chmod(tmp_name, 0o600)
-            os.replace(tmp_name, bootstrap_path)
-            os.chown(bootstrap_path, user.pw_uid, user.pw_gid)
-            os.chmod(bootstrap_path, 0o600)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
 
-        return str(bootstrap_path)
+            os.replace(tmp_name, "bootstrap", src_dir_fd=kube_fd, dst_dir_fd=kube_fd)
+            tmp_name = ""
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_name and kube_fd is not None:
+                try:
+                    os.unlink(tmp_name, dir_fd=kube_fd)
+                except FileNotFoundError:
+                    pass
+            if kube_fd is not None:
+                os.close(kube_fd)
+            if home_fd is not None:
+                os.close(home_fd)
+
+        return str(home / ".kube/bootstrap")
 
     def issue_bootstrap(self, uid: int, user: pwd.struct_passwd, payload: dict[str, Any]) -> dict[str, Any]:
         reason = str(payload.get("reason") or "login-recovery")
@@ -302,18 +361,22 @@ class BootstrapDaemon:
         if not bootstrap_kubeconfig:
             raise DaemonError("issuer_missing_bootstrap_kubeconfig")
 
-        bootstrap_path = self.write_bootstrap_file(user, bootstrap_kubeconfig)
-        write_json_file(
-            self.token_cache_path(uid),
-            {
-                "user": user.pw_name,
-                "uid": uid,
-                "tokenId": token_id,
-                "issuedAt": iso_now(),
-                "expiresAt": expires_at,
-                "reason": reason,
-            },
-        )
+        try:
+            bootstrap_path = self.write_bootstrap_file(user, bootstrap_kubeconfig)
+            write_json_file(
+                self.token_cache_path(uid),
+                {
+                    "user": user.pw_name,
+                    "uid": uid,
+                    "tokenId": token_id,
+                    "issuedAt": iso_now(),
+                    "expiresAt": expires_at,
+                    "reason": reason,
+                },
+            )
+        except Exception:
+            self.revoke_token_best_effort(token_id)
+            raise
         self.clear_failure(uid)
 
         return {

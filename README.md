@@ -102,6 +102,10 @@ example:
 git -C vendor/platform-k8s-bastion checkout v1.0.0
 ```
 
+When a tag changes installed runtime behavior, `runtime/VERSION` should match
+that tag. Documentation-only tags may leave `runtime/VERSION` unchanged because
+the installed runtime has not changed.
+
 `runtime/install-manifest.yml` is the install contract consumed by
 `platform-config`. Changes that add, remove, or move runtime commands should
 update the manifest, tests, `CHANGELOG.md`, and `NEWS.md` in the same release.
