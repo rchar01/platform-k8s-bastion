@@ -7,6 +7,19 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-19
+
+### Fixed
+
+- Install user and admin kubeconfigs through a shared FD-based writer that opens
+  home and `.kube` directories with `O_NOFOLLOW` and rejects symlinked targets.
+- Bind CSR approval to the validated CSR `uid` and `resourceVersion` before
+  writing the approval subresource.
+- Restrict the bootstrap daemon socket path to `/run/bastion-bootstrapd` and
+  refuse to unlink non-socket or non-root-owned stale paths.
+- Generate DNS-1123-compatible CSR object names with a hash suffix for enrollment
+  and renewal.
+
 ## [1.1.0] - 2026-05-19
 
 ### Fixed

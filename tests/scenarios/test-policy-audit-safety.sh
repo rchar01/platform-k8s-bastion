@@ -17,6 +17,47 @@ test_policy_user_lookups_are_indexed() {
   fi
 }
 
+test_policy_identity_validation_is_wired() {
+  grep -q 'POLICY_LINUX_NAME_PATTERN' "${ROOT_DIR}/runtime/lib/policy.sh" || {
+    printf 'Policy Linux identity validation pattern not found\n' >&2
+    exit 1
+  }
+
+  for script in \
+    "${ROOT_DIR}/runtime/sbin/bastion-bootstrap-user-groups" \
+    "${ROOT_DIR}/runtime/sbin/bastion-bootstrap-admin-kubeconfig" \
+    "${ROOT_DIR}/runtime/sbin/bastion-disable-user"; do
+    grep -q 'policy_validate_identity_names\|policy_read' "$script" || {
+      printf 'Policy identity validation not wired in %s\n' "$script" >&2
+      exit 1
+    }
+  done
+}
+
+test_csr_names_are_dns1123_with_hash() {
+  local name long_name
+
+  name="$(dns1123_name_with_hash 'User.Name_With@Invalid/Chars' 'Renew_ABC')"
+  [[ "$name" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || {
+    printf 'CSR name is not DNS-1123 compatible: %s\n' "$name" >&2
+    exit 1
+  }
+  [[ "$name" == user-name-with-invalid-chars-renew-abc-* ]] || {
+    printf 'CSR name does not preserve sanitized user/suffix prefix: %s\n' "$name" >&2
+    exit 1
+  }
+  [[ "$name" =~ -[0-9a-f]{10}$ ]] || {
+    printf 'CSR name does not include expected hash suffix: %s\n' "$name" >&2
+    exit 1
+  }
+
+  long_name="$(dns1123_name_with_hash "$(printf 'a%.0s' {1..300})" 'renew')"
+  ((${#long_name} <= 253)) || {
+    printf 'CSR name exceeds Kubernetes name length: %s\n' "${#long_name}" >&2
+    exit 1
+  }
+}
+
 test_audit_event_json_escapes_details() {
   local tmp line
 
@@ -24,17 +65,20 @@ test_audit_event_json_escapes_details() {
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' RETURN
 
-  PROGRAM_NAME="audit-json-test" \
+  SUDO_USER=$'actor"name\\with\nnewline' \
+    PROGRAM_NAME=$'audit-json-test"program' \
     BASTION_AUDIT_LOG="$tmp" \
-    audit_event 'quote"action' 'ok' $'details with "quotes"\nand newline'
+    audit_event $'quote"action\\name' $'ok"outcome' $'details with "quotes"\\slashes\nand newline'
 
   IFS= read -r line < "$tmp"
 
   jq -e \
-    --arg program "audit-json-test" \
-    --arg action 'quote"action' \
-    --arg details $'details with "quotes"\nand newline' \
-    '.program == $program and .action == $action and .details == $details' <<< "$line" > /dev/null
+    --arg program $'audit-json-test"program' \
+    --arg action $'quote"action\\name' \
+    --arg outcome $'ok"outcome' \
+    --arg actor $'actor"name\\with\nnewline' \
+    --arg details $'details with "quotes"\\slashes\nand newline' \
+    '.program == $program and .action == $action and .outcome == $outcome and .actor == $actor and .details == $details' <<< "$line" > /dev/null
 }
 
 test_login_bootstrap_uses_private_temp_files() {
@@ -119,6 +163,8 @@ source "${ROOT_DIR}/runtime/lib/audit.sh"
 source "${ROOT_DIR}/runtime/lib/common.sh"
 
 test_policy_user_lookups_are_indexed
+test_policy_identity_validation_is_wired
+test_csr_names_are_dns1123_with_hash
 test_audit_event_json_escapes_details
 test_login_bootstrap_uses_private_temp_files
 test_daemon_connection_handling_is_bounded

@@ -56,6 +56,27 @@ class BootstrapDaemonConcurrencyTests(unittest.TestCase):
         daemon = self.daemon()
         self.assertIs(daemon.inflight_lock_for_uid(1000), daemon.inflight_lock_for_uid(1000))
 
+    def test_socket_path_must_be_under_runtime_dir(self) -> None:
+        with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "under /run/bastion-bootstrapd"):
+            bastion_bootstrapd.normalize_socket_path("/tmp/bootstrapd.sock")
+
+    def test_socket_path_must_be_direct_child(self) -> None:
+        with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "direct child"):
+            bastion_bootstrapd.normalize_socket_path("/run/bastion-bootstrapd/nested/bootstrapd.sock")
+
+    def test_socket_path_normalizes_allowed_direct_child(self) -> None:
+        self.assertEqual(
+            bastion_bootstrapd.normalize_socket_path("/run/bastion-bootstrapd/./bootstrapd.sock"),
+            "/run/bastion-bootstrapd/bootstrapd.sock",
+        )
+
+    def test_stale_socket_removal_rejects_non_socket(self) -> None:
+        daemon = self.daemon()
+        daemon.socket_path = __file__
+
+        with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "non-socket"):
+            daemon.remove_stale_socket()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,7 @@ LIB_DIR="$(resolve_lib_dir)"
 
 source "${LIB_DIR}/log.sh"
 source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/policy.sh"
 
 # --------------------------------------------------
 # Defaults
@@ -75,8 +76,9 @@ parse_args() {
 
 validate_inputs() {
   [[ -f "$POLICY" ]] || die "Policy not found: $POLICY"
-  DAEMON_LOGIN_GROUP="$(yq -r '.daemon.allowedLoginGroup // ""' "$POLICY")"
-  [[ -n "$DAEMON_LOGIN_GROUP" ]] || die "daemon.allowedLoginGroup missing in policy"
+  POLICY_FILE="$POLICY"
+  policy_read
+  DAEMON_LOGIN_GROUP="$DAEMON_ALLOWED_LOGIN_GROUP"
 }
 
 # --------------------------------------------------
@@ -122,7 +124,7 @@ ensure_user_in_group() {
 ensure_all_groups() {
   log_info "Ensuring groups exist"
 
-  mapfile -t groups < <(yq -r '.groups | keys[]' "$POLICY")
+  mapfile -t groups < <(yq -r '(.groups // {}) | keys[]' "$POLICY")
 
   for g in "${groups[@]}"; do
     ensure_group_exists "$g"
@@ -138,7 +140,7 @@ get_user_groups() {
 process_users() {
   log_info "Processing users"
 
-  mapfile -t users < <(yq -r '.users | keys[]' "$POLICY")
+  mapfile -t users < <(yq -r '(.users // {}) | keys[]' "$POLICY")
 
   for user in "${users[@]}"; do
     log_debug "Evaluating user: $user"

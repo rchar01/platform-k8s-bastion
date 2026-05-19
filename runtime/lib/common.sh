@@ -36,3 +36,39 @@ require_arg() {
 
   [[ -n "$value" && "$value" != --* ]] || die "Missing value for ${opt}"
 }
+
+dns1123_name_with_hash() {
+  local raw="$1"
+  local suffix="${2:-}"
+  local hash prefix max_prefix
+
+  [[ -n "$raw" ]] || die "Cannot build DNS-1123 name from empty input"
+
+  hash="$(printf '%s' "$raw" | sha256sum | cut -c1-10)"
+  prefix="$(printf '%s' "$raw" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  [[ -n "$prefix" ]] || prefix="user"
+
+  if [[ -n "$suffix" ]]; then
+    suffix="$(printf '%s' "$suffix" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+    suffix="${suffix:0:120}"
+    suffix="$(printf '%s' "$suffix" | sed -E 's/-+$//')"
+  fi
+
+  if [[ -n "$suffix" ]]; then
+    max_prefix=$((253 - ${#hash} - ${#suffix} - 2))
+    prefix="${prefix:0:max_prefix}"
+    prefix="$(printf '%s' "$prefix" | sed -E 's/-+$//')"
+    [[ -n "$prefix" ]] || prefix="user"
+    printf '%s-%s-%s\n' "$prefix" "$suffix" "$hash"
+  else
+    max_prefix=$((253 - ${#hash} - 1))
+    prefix="${prefix:0:max_prefix}"
+    prefix="$(printf '%s' "$prefix" | sed -E 's/-+$//')"
+    [[ -n "$prefix" ]] || prefix="user"
+    printf '%s-%s\n' "$prefix" "$hash"
+  fi
+}

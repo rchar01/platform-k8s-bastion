@@ -15,6 +15,9 @@ main() {
   run_test "Runtime install manifest" "${SCRIPT_DIR}/scenarios/test-install-manifest.sh"
   run_test "Policy lookup and audit JSON safety" "${SCRIPT_DIR}/scenarios/test-policy-audit-safety.sh"
   run_test "CSR cleanup selector" "${SCRIPT_DIR}/scenarios/test-csr-cleanup-selector.sh"
+  run_test "CSR approval race hardening" "${SCRIPT_DIR}/scenarios/test-csr-approver-approval-race.sh"
+  printf '==> Kubeconfig writer unit tests\n'
+  python3 "${SCRIPT_DIR}/scenarios/test-kubeconfig-writer.py"
   printf '==> Bootstrap daemon unit tests\n'
   python3 "${SCRIPT_DIR}/scenarios/test-bootstrap-daemon.py"
 }

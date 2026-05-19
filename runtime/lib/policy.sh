@@ -1,5 +1,43 @@
 #!/usr/bin/env bash
 
+POLICY_LINUX_NAME_PATTERN='^[a-z_][a-z0-9_-]{0,31}$'
+
+policy_validate_linux_name() {
+  local kind="$1"
+  local name="$2"
+
+  [[ -n "$name" ]] || die "${kind} is empty"
+  [[ "$name" =~ $POLICY_LINUX_NAME_PATTERN ]] || die "${kind} must match ${POLICY_LINUX_NAME_PATTERN}: ${name}"
+}
+
+policy_validate_identity_names() {
+  local policy="${1:-${POLICY_FILE:-/etc/bastion/access-policy.yaml}}"
+  local daemon_allowed_group group_prefix group user
+
+  [[ -f "$policy" ]] || die "Policy file not found: $policy"
+
+  daemon_allowed_group="$(yq -r '.daemon.allowedLoginGroup // ""' "$policy")"
+  group_prefix="$(yq -r '.csr.groupPrefix // ""' "$policy")"
+
+  policy_validate_linux_name "daemon.allowedLoginGroup" "$daemon_allowed_group"
+  policy_validate_linux_name "csr.groupPrefix" "$group_prefix"
+
+  while IFS= read -r group; do
+    [[ -n "$group" ]] || continue
+    policy_validate_linux_name "policy group" "$group"
+  done < <(yq -r '(.groups // {}) | keys[]' "$policy")
+
+  while IFS= read -r user; do
+    [[ -n "$user" ]] || continue
+    policy_validate_linux_name "policy user" "$user"
+
+    while IFS= read -r group; do
+      [[ -n "$group" ]] || continue
+      policy_validate_linux_name "policy ensureGroups entry for ${user}" "$group"
+    done < <(USER_KEY="$user" yq -r '(.users[strenv(USER_KEY)].ensureGroups // []) | .[]' "$policy")
+  done < <(yq -r '(.users // {}) | keys[]' "$policy")
+}
+
 policy_read() {
   local policy="${POLICY_FILE:-/etc/bastion/access-policy.yaml}"
 
@@ -44,6 +82,8 @@ policy_read() {
   [[ "$daemon_request_max_bytes" =~ ^[0-9]+$ ]] || die "daemon.request.maxBytes must be integer"
   [[ "$daemon_request_timeout" =~ ^[0-9]+$ ]] || die "daemon.request.timeoutSeconds must be integer"
   [[ "$daemon_failure_backoff" =~ ^[0-9]+$ ]] || die "daemon.rateLimit.failureBackoffSeconds must be integer"
+
+  policy_validate_identity_names "$policy"
 
   ((cert_ttl_min <= cert_ttl_default)) || die "csr.ttl.defaultSeconds must be >= csr.ttl.minSeconds"
   ((cert_ttl_default <= cert_ttl_max)) || die "csr.ttl.defaultSeconds must be <= csr.ttl.maxSeconds"

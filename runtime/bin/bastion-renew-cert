@@ -102,6 +102,7 @@ main() {
   need_cmd jq
   need_cmd install
   need_cmd flock
+  need_cmd sha256sum
 
   parse_args "$@"
 
@@ -170,7 +171,7 @@ main() {
   audit_event "renew" "start" "user=${user_name}"
 
   openssl req -new -newkey rsa:2048 -nodes -keyout "$key_tmp" -out "$csr_tmp" -subj "$subj" > /dev/null 2>&1
-  csr_name="${user_name}-renew-$(date +%s)"
+  csr_name="$(dns1123_name_with_hash "$user_name" "renew-$(date +%s)")"
 
   kubectl --kubeconfig="$USER_CONFIG_PATH" apply -f - > /dev/null << EOF
 apiVersion: certificates.k8s.io/v1

@@ -26,6 +26,7 @@ from typing import Any
 PROGRAM_NAME = "bastion-bootstrapd"
 POLICY_PATH = os.environ.get("POLICY_FILE", "/etc/bastion/access-policy.yaml")
 DEFAULT_SOCKET_PATH = "/run/bastion-bootstrapd/bootstrapd.sock"
+RUNTIME_DIR = Path("/run/bastion-bootstrapd")
 RUNTIME_TOKENS_DIR = "/run/bastion-bootstrapd/tokens"
 RUNTIME_FAILURES_DIR = "/run/bastion-bootstrapd/failures"
 ALLOWED_ACTIONS = {"health", "issue-bootstrap", "revoke-bootstrap"}
@@ -106,18 +107,34 @@ def write_json_file(path: Path, data: dict[str, Any], mode: int = 0o600) -> None
             os.unlink(tmp_name)
 
 
+def normalize_socket_path(raw_path: str, base_dir: Path = RUNTIME_DIR) -> str:
+    if not raw_path:
+        raise DaemonError("daemon.socket.path missing in policy")
+
+    path = Path(os.path.normpath(raw_path))
+    if not path.is_absolute():
+        raise DaemonError("daemon.socket.path must be absolute")
+    try:
+        path.relative_to(base_dir)
+    except ValueError as exc:
+        raise DaemonError(f"daemon.socket.path must be under {base_dir}") from exc
+    if path.parent != base_dir:
+        raise DaemonError(f"daemon.socket.path must be a direct child of {base_dir}")
+    if not path.name or path.name in {".", ".."}:
+        raise DaemonError("daemon.socket.path must include a socket filename")
+    return str(path)
+
+
 class BootstrapDaemon:
     def __init__(self) -> None:
         self.allowed_group = yq_read('.daemon.allowedLoginGroup // ""')
-        self.socket_path = yq_read('.daemon.socket.path // ""') or DEFAULT_SOCKET_PATH
+        self.socket_path = normalize_socket_path(yq_read('.daemon.socket.path // ""') or DEFAULT_SOCKET_PATH)
         self.max_bytes = int(yq_read('.daemon.request.maxBytes // "0"'))
         self.request_timeout = int(yq_read('.daemon.request.timeoutSeconds // "0"'))
         self.failure_backoff = int(yq_read('.daemon.rateLimit.failureBackoffSeconds // "0"'))
 
         if not self.allowed_group:
             raise DaemonError("daemon.allowedLoginGroup missing in policy")
-        if not self.socket_path:
-            raise DaemonError("daemon.socket.path missing in policy")
         if self.max_bytes <= 0:
             raise DaemonError("daemon.request.maxBytes must be > 0")
         if self.request_timeout <= 0:
@@ -175,19 +192,42 @@ class BootstrapDaemon:
 
     def ensure_runtime_paths(self) -> None:
         run_dir = Path(self.socket_path).parent
+        if run_dir != RUNTIME_DIR:
+            raise DaemonError(f"daemon.socket.path must be a direct child of {RUNTIME_DIR}")
+        if run_dir.is_symlink():
+            raise DaemonError(f"runtime directory is a symlink: {run_dir}")
         run_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(run_dir, 0o750)
 
         try:
             gid = grp.getgrnam(self.allowed_group).gr_gid
-            os.chown(run_dir, 0, gid)
         except KeyError:
             raise DaemonError(f"allowed group not found: {self.allowed_group}")
+
+        try:
+            run_fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise DaemonError(f"runtime directory is not safe: {run_dir}") from exc
+        try:
+            os.fchown(run_fd, 0, gid)
+            os.fchmod(run_fd, 0o750)
+        finally:
+            os.close(run_fd)
 
         Path(RUNTIME_TOKENS_DIR).mkdir(parents=True, exist_ok=True)
         os.chmod(RUNTIME_TOKENS_DIR, 0o700)
         Path(RUNTIME_FAILURES_DIR).mkdir(parents=True, exist_ok=True)
         os.chmod(RUNTIME_FAILURES_DIR, 0o700)
+
+    def remove_stale_socket(self) -> None:
+        try:
+            socket_stat = os.lstat(self.socket_path)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(socket_stat.st_mode):
+            raise DaemonError(f"refusing to unlink non-socket path: {self.socket_path}")
+        if socket_stat.st_uid != 0:
+            raise DaemonError(f"refusing to unlink non-root-owned socket: {self.socket_path}")
+        os.unlink(self.socket_path)
 
     def should_backoff(self, uid: int) -> bool:
         cache = read_json_file(self.failure_cache_path(uid))
@@ -543,10 +583,8 @@ class BootstrapDaemon:
             self.connection_semaphore.release()
 
     def serve_forever(self) -> None:
-        if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
-
         self.ensure_runtime_paths()
+        self.remove_stale_socket()
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(self.socket_path)

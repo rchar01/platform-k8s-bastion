@@ -46,6 +46,7 @@ LIB_DIR="$(resolve_lib_dir)"
 
 source "${LIB_DIR}/log.sh"
 source "${LIB_DIR}/common.sh"
+source "${LIB_DIR}/policy.sh"
 
 # --------------------------------------------------
 # Defaults
@@ -124,6 +125,8 @@ policy_has_user() {
 
 validate_inputs() {
   [[ -f "$POLICY" ]] || die "Policy not found: $POLICY"
+  policy_validate_linux_name "target user" "$TARGET_USER"
+  policy_validate_identity_names "$POLICY"
   getent passwd "$TARGET_USER" > /dev/null 2>&1 || die "User not found on host: $TARGET_USER"
 
   if policy_has_user "$TARGET_USER" && [[ "$FORCE" -ne 1 ]]; then

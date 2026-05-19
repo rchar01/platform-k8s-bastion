@@ -4,6 +4,21 @@ This file gives a short, release-oriented view of what changed between versions.
 
 ## Unreleased
 
+## v1.1.1 - 2026-05-19
+
+Runtime security hardening update.
+
+Highlights:
+
+- User and admin kubeconfig bootstrap now use a shared FD-based writer that
+  rejects symlinked home, `.kube`, and kubeconfig paths.
+- CSR approval now rechecks the validated object identity before writing the
+  approval subresource.
+- The bootstrap daemon now rejects policy socket paths outside
+  `/run/bastion-bootstrapd` and refuses to remove non-socket stale paths.
+- CSR object names are now sanitized to Kubernetes DNS-1123-compatible names
+  while retaining a hash of the original username for uniqueness.
+
 ## v1.1.0 - 2026-05-19
 
 Runtime correctness and bootstrap hardening updates.
