@@ -4,6 +4,8 @@ This file gives a short, release-oriented view of what changed between versions.
 
 ## Unreleased
 
+## v1.1.0 - 2026-05-19
+
 Runtime correctness and bootstrap hardening updates.
 
 Highlights:
