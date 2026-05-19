@@ -29,6 +29,7 @@ DEFAULT_SOCKET_PATH = "/run/bastion-bootstrapd/bootstrapd.sock"
 RUNTIME_TOKENS_DIR = "/run/bastion-bootstrapd/tokens"
 RUNTIME_FAILURES_DIR = "/run/bastion-bootstrapd/failures"
 ALLOWED_ACTIONS = {"health", "issue-bootstrap", "revoke-bootstrap"}
+MAX_CONCURRENT_CONNECTIONS = 32
 
 
 class DaemonError(Exception):
@@ -127,12 +128,17 @@ class BootstrapDaemon:
         self.shutdown_event = threading.Event()
         self.inflight_locks: dict[int, threading.Lock] = {}
         self.inflight_global_lock = threading.Lock()
+        self.connection_semaphore = threading.BoundedSemaphore(MAX_CONCURRENT_CONNECTIONS)
 
     def token_cache_path(self, uid: int) -> Path:
         return Path(RUNTIME_TOKENS_DIR) / f"{uid}.json"
 
     def failure_cache_path(self, uid: int) -> Path:
         return Path(RUNTIME_FAILURES_DIR) / f"{uid}.json"
+
+    def inflight_lock_for_uid(self, uid: int) -> threading.Lock:
+        with self.inflight_global_lock:
+            return self.inflight_locks.setdefault(uid, threading.Lock())
 
     def peer_identity(self, conn: socket.socket) -> tuple[int, int, int]:
         raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -409,8 +415,7 @@ class BootstrapDaemon:
             if self.should_backoff(uid):
                 raise DaemonError("rate_limited")
 
-            with self.inflight_global_lock:
-                lock = self.inflight_locks.setdefault(uid, threading.Lock())
+            lock = self.inflight_lock_for_uid(uid)
 
             if not lock.acquire(blocking=False):
                 raise DaemonError("busy")
@@ -423,7 +428,13 @@ class BootstrapDaemon:
             finally:
                 lock.release()
         if action == "revoke-bootstrap":
-            return self.revoke_bootstrap(uid, user, payload)
+            lock = self.inflight_lock_for_uid(uid)
+            if not lock.acquire(blocking=False):
+                raise DaemonError("busy")
+            try:
+                return self.revoke_bootstrap(uid, user, payload)
+            finally:
+                lock.release()
         raise DaemonError("action_not_allowed")
 
     def decode_request(self, conn: socket.socket) -> dict[str, Any]:
@@ -525,6 +536,12 @@ class BootstrapDaemon:
             except OSError:
                 pass
 
+    def handle_connection_limited(self, conn: socket.socket) -> None:
+        try:
+            self.handle_connection(conn)
+        finally:
+            self.connection_semaphore.release()
+
     def serve_forever(self) -> None:
         if os.path.exists(self.socket_path):
             os.unlink(self.socket_path)
@@ -555,7 +572,29 @@ class BootstrapDaemon:
                     if exc.errno == errno.EINTR:
                         continue
                     raise
-                threading.Thread(target=self.handle_connection, args=(conn,), daemon=True).start()
+                if not self.connection_semaphore.acquire(blocking=False):
+                    request_id = str(uuid.uuid4())
+                    try:
+                        self.send_response(conn, request_id, False, None, "server_busy")
+                    except OSError:
+                        pass
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    log_event("warn", "connection", "error", request_id, None, None, {"error": "server_busy"})
+                    continue
+
+                try:
+                    thread = threading.Thread(target=self.handle_connection_limited, args=(conn,), daemon=True)
+                    thread.start()
+                except Exception as exc:
+                    self.connection_semaphore.release()
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    log_event("error", "connection", "error", str(uuid.uuid4()), None, None, {"error": "thread_start_failed", "detail": str(exc)})
         finally:
             sock.close()
             try:

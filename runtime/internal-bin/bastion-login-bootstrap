@@ -120,6 +120,8 @@ main() {
   need_cmd jq
   need_cmd install
   need_cmd flock
+  need_cmd mktemp
+  need_cmd rm
 
   local kube_state_cmd enroll_cmd daemon_client_cmd
   kube_state_cmd="$(resolve_internal_cmd bastion-kube-state || true)"
@@ -139,6 +141,7 @@ main() {
   trap 'bastion_lock_release' EXIT
 
   local state_json state reason now_epoch last_fail fail_epoch token_json token_id cert_not_after
+  local issue_err="" enroll_out="" enroll_err=""
   state_json="$("$kube_state_cmd")"
   state="$(jq -r '.status' <<< "$state_json")"
   reason="$(jq -r '.reason' <<< "$state_json")"
@@ -171,8 +174,13 @@ main() {
     fi
   fi
 
+  trap '[[ -n "${issue_err:-}" ]] && rm -f "$issue_err"; [[ -n "${enroll_out:-}" ]] && rm -f "$enroll_out"; [[ -n "${enroll_err:-}" ]] && rm -f "$enroll_err"; bastion_lock_release' EXIT
+  issue_err="$(mktemp "$(bastion_state_dir)/login-bootstrap.err.XXXXXX")"
+  enroll_out="$(mktemp "$(bastion_state_dir)/login-enroll.out.XXXXXX")"
+  enroll_err="$(mktemp "$(bastion_state_dir)/login-enroll.err.XXXXXX")"
+
   audit_event "login_bootstrap" "start" "reason=login-recovery"
-  if ! token_json="$("$daemon_client_cmd" issue-bootstrap --socket "$DAEMON_SOCKET_PATH" --timeout-seconds "$DAEMON_REQUEST_TIMEOUT_SECONDS" --reason login-recovery --ttl-seconds "$BOOTSTRAP_TOKEN_TTL_DEFAULT_SECONDS" 2> /tmp/bastion-login-bootstrap.err)"; then
+  if ! token_json="$("$daemon_client_cmd" issue-bootstrap --socket "$DAEMON_SOCKET_PATH" --timeout-seconds "$DAEMON_REQUEST_TIMEOUT_SECONDS" --reason login-recovery --ttl-seconds "$BOOTSTRAP_TOKEN_TTL_DEFAULT_SECONDS" 2> "$issue_err")"; then
     update_state "failed" "daemon_issue_failed" "" "" "$cert_not_after"
     audit_event "login_bootstrap" "error" "step=daemon_issue"
     [[ "$QUIET" -eq 1 ]] || printf '%s\n' "Kubernetes certificate bootstrap failed; see bastion logs."
@@ -181,7 +189,7 @@ main() {
 
   token_id="$(jq -r '.result.tokenId // empty' <<< "$token_json")"
 
-  if ! "$enroll_cmd" --reason login-recovery > /tmp/bastion-login-enroll.out 2> /tmp/bastion-login-enroll.err; then
+  if ! "$enroll_cmd" --reason login-recovery > "$enroll_out" 2> "$enroll_err"; then
     update_state "failed" "enroll_failed" "" "$token_id" "$cert_not_after"
     audit_event "login_bootstrap" "error" "step=enroll"
     [[ -n "$token_id" ]] && "$daemon_client_cmd" revoke-bootstrap --socket "$DAEMON_SOCKET_PATH" --timeout-seconds "$DAEMON_REQUEST_TIMEOUT_SECONDS" --token-id "$token_id" > /dev/null 2>&1 || true
