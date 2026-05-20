@@ -203,14 +203,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--remove", action="append", default=[])
     args = parser.parse_args(argv)
 
-    if bool(args.source) == bool(args.stdin):
+    if not args.remove and bool(args.source) == bool(args.stdin):
         parser.error("exactly one of --source or --stdin is required")
+    if args.remove and args.source and args.stdin:
+        parser.error("--source and --stdin are mutually exclusive")
 
     try:
         user = _target_user(args.user)
         for name in args.remove:
             if remove_user_kube_file(user, args.home_dir, name):
                 print(f"removed {name}")
+
+        if args.remove and not args.source and not args.stdin:
+            return 0
 
         if args.stdin:
             content = sys.stdin.buffer.read()

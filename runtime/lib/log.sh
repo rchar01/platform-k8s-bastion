@@ -8,6 +8,13 @@
 : "${LOG_TS:=1}"
 : "${LOG_FILE:=}"
 
+_log_file_path() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s\n' "$LOG_FILE"
+}
+
 _log_level_num() {
   case "$1" in
     DEBUG) echo 10 ;;
@@ -48,9 +55,11 @@ _log_write() {
     echo "$line"
   fi
 
-  # optional file logging
-  if [[ -n "$LOG_FILE" ]]; then
-    echo "$line" >> "$LOG_FILE"
+  # optional file logging for non-root callers only
+  local log_file
+  log_file="$(_log_file_path)"
+  if [[ -n "$log_file" ]]; then
+    echo "$line" >> "$log_file"
   fi
 }
 

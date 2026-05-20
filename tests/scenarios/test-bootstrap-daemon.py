@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import struct
+import sys
 import threading
 import types
 import unittest
@@ -76,6 +78,51 @@ class BootstrapDaemonConcurrencyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "non-socket"):
             daemon.remove_stale_socket()
+
+    def test_peer_identity_uses_linux_ucred_order(self) -> None:
+        daemon = self.daemon()
+
+        class FakeConn:
+            def getsockopt(self, _level, _option, _size):
+                return struct.pack("3i", 4321, 1000, 1001)
+
+        self.assertEqual(daemon.peer_identity(FakeConn()), (1000, 1001, 4321))
+
+    def test_run_cmd_redacts_failed_command_details(self) -> None:
+        secret = "secret-token-id"
+        with self.assertRaises(bastion_bootstrapd.DaemonError) as ctx:
+            bastion_bootstrapd.run_cmd(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('secret-token-id', file=sys.stderr); sys.exit(9)",
+                    "--token-id",
+                    secret,
+                ],
+                timeout_seconds=1,
+            )
+
+        error = str(ctx.exception)
+        self.assertEqual(error, "command_failed rc=9")
+        self.assertNotIn(secret, error)
+
+    def test_issue_rejects_bool_ttl(self) -> None:
+        daemon = self.daemon()
+        user = types.SimpleNamespace(pw_name="alice", pw_dir="/home/alice")
+
+        with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "ttl_invalid"):
+            daemon.issue_bootstrap(1000, user, {"ttlSeconds": True})
+
+    def test_issue_rejects_invalid_reason_before_issuer_call(self) -> None:
+        daemon = self.daemon()
+        user = types.SimpleNamespace(pw_name="alice", pw_dir="/home/alice")
+        original_yq_read = bastion_bootstrapd.yq_read
+        bastion_bootstrapd.yq_read = lambda _path: "600"
+        try:
+            with self.assertRaisesRegex(bastion_bootstrapd.DaemonError, "reason_invalid"):
+                daemon.issue_bootstrap(1000, user, {"reason": "bad", "ttlSeconds": 60})
+        finally:
+            bastion_bootstrapd.yq_read = original_yq_read
 
 
 if __name__ == "__main__":

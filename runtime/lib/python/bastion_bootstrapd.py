@@ -53,10 +53,12 @@ def parse_iso8601(value: str) -> dt.datetime | None:
 
 
 def run_cmd(cmd: list[str], timeout_seconds: int) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise DaemonError("command_timeout") from exc
     if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip().replace("\n", " ")
-        raise DaemonError(f"command_failed rc={proc.returncode} cmd={' '.join(cmd)} stderr={stderr}")
+        raise DaemonError(f"command_failed rc={proc.returncode}")
     return proc.stdout
 
 
@@ -159,7 +161,7 @@ class BootstrapDaemon:
 
     def peer_identity(self, conn: socket.socket) -> tuple[int, int, int]:
         raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        uid, gid, pid = struct.unpack("3i", raw)
+        pid, uid, gid = struct.unpack("3i", raw)
         return uid, gid, pid
 
     def load_user(self, uid: int) -> pwd.struct_passwd:
@@ -328,6 +330,7 @@ class BootstrapDaemon:
 
             os.replace(tmp_name, "bootstrap", src_dir_fd=kube_fd, dst_dir_fd=kube_fd)
             tmp_name = ""
+            os.fsync(kube_fd)
         finally:
             if fd is not None:
                 try:
@@ -346,13 +349,81 @@ class BootstrapDaemon:
 
         return str(home / ".kube/bootstrap")
 
+    def remove_bootstrap_file(self, user: pwd.struct_passwd) -> None:
+        home = Path(user.pw_dir)
+        home_fd: int | None = None
+        kube_fd: int | None = None
+        fd: int | None = None
+
+        if not str(home).startswith("/home/"):
+            raise DaemonError("home_not_allowed")
+
+        try:
+            home_fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise DaemonError("home_not_safe") from exc
+
+        try:
+            home_stat = os.fstat(home_fd)
+            if not stat.S_ISDIR(home_stat.st_mode):
+                raise DaemonError("home_not_directory")
+            if home_stat.st_uid != user.pw_uid:
+                raise DaemonError("home_owner_mismatch")
+
+            try:
+                kube_fd = os.open(".kube", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise DaemonError("kube_dir_not_safe") from exc
+
+            kube_stat = os.fstat(kube_fd)
+            if not stat.S_ISDIR(kube_stat.st_mode):
+                raise DaemonError("kube_dir_not_directory")
+            if kube_stat.st_uid not in (0, user.pw_uid):
+                raise DaemonError("kube_dir_owner_mismatch")
+
+            try:
+                fd = os.open("bootstrap", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=kube_fd)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise DaemonError("bootstrap_not_safe") from exc
+
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise DaemonError("bootstrap_not_regular")
+
+            os.close(fd)
+            fd = None
+            os.unlink("bootstrap", dir_fd=kube_fd)
+            os.fsync(kube_fd)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if kube_fd is not None:
+                os.close(kube_fd)
+            if home_fd is not None:
+                os.close(home_fd)
+
     def issue_bootstrap(self, uid: int, user: pwd.struct_passwd, payload: dict[str, Any]) -> dict[str, Any]:
         reason = str(payload.get("reason") or "login-recovery")
         ttl_seconds = payload.get("ttlSeconds")
         if ttl_seconds is None:
             ttl_seconds = int(yq_read('.bootstrap.ttl.defaultSeconds // "0"'))
-        if not isinstance(ttl_seconds, int):
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool):
             raise DaemonError("ttl_invalid")
+        if ttl_seconds < 60:
+            raise DaemonError("ttl_too_small")
+        max_ttl_seconds = int(yq_read('.bootstrap.ttl.maxSeconds // "0"'))
+        if max_ttl_seconds <= 0:
+            raise DaemonError("ttl_max_invalid")
+        if ttl_seconds > max_ttl_seconds:
+            raise DaemonError("ttl_too_large")
+        if reason not in {"initial-enrollment", "login-recovery", "manual-recovery"}:
+            raise DaemonError("reason_invalid")
 
         cache = read_json_file(self.token_cache_path(uid))
         if cache:
@@ -446,6 +517,10 @@ class BootstrapDaemon:
         cmd = ["/usr/local/sbin/bastion-bootstrap-token-revoke", "--token-id", token_id]
         run_cmd(cmd, timeout_seconds=self.request_timeout)
         self.token_cache_path(uid).unlink(missing_ok=True)
+        try:
+            self.remove_bootstrap_file(_user)
+        except DaemonError:
+            pass
         return {"revoked": True, "tokenId": token_id}
 
     def dispatch(self, action: str, uid: int, user: pwd.struct_passwd, payload: dict[str, Any]) -> dict[str, Any]:

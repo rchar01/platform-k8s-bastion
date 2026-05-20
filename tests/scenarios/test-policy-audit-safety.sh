@@ -65,9 +65,10 @@ test_audit_event_json_escapes_details() {
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' RETURN
 
+  audit_log_path() { printf '%s\n' "$tmp"; }
+
   SUDO_USER=$'actor"name\\with\nnewline' \
     PROGRAM_NAME=$'audit-json-test"program' \
-    BASTION_AUDIT_LOG="$tmp" \
     audit_event $'quote"action\\name' $'ok"outcome' $'details with "quotes"\\slashes\nand newline'
 
   IFS= read -r line < "$tmp"
@@ -79,6 +80,35 @@ test_audit_event_json_escapes_details() {
     --arg actor $'actor"name\\with\nnewline' \
     --arg details $'details with "quotes"\\slashes\nand newline' \
     '.program == $program and .action == $action and .outcome == $outcome and .actor == $actor and .details == $details' <<< "$line" > /dev/null
+}
+
+test_root_log_path_overrides_are_ignored() {
+  grep -q 'EUID.*-eq 0' "${ROOT_DIR}/runtime/lib/audit.sh" || {
+    printf 'Audit log path does not ignore root environment overrides\n' >&2
+    exit 1
+  }
+  grep -q 'EUID.*-eq 0' "${ROOT_DIR}/runtime/lib/log.sh" || {
+    printf 'General log path does not ignore root environment overrides\n' >&2
+    exit 1
+  }
+}
+
+test_disable_user_uses_safe_kubeconfig_removal() {
+  local script
+
+  script="${ROOT_DIR}/runtime/sbin/bastion-disable-user"
+  if grep -n 'run_cmd mv "\$path" "\$backup"' "$script"; then
+    printf 'bastion-disable-user still root-renames user-controlled kubeconfig paths\n' >&2
+    exit 1
+  fi
+  grep -q 'bastion_kubeconfig_writer.py' "$script" || {
+    printf 'bastion-disable-user does not use the safe kubeconfig writer\n' >&2
+    exit 1
+  }
+  grep -q -- '--remove bootstrap --remove config' "$script" || {
+    printf 'bastion-disable-user does not remove both kubeconfig files safely\n' >&2
+    exit 1
+  }
 }
 
 test_login_bootstrap_uses_private_temp_files() {
@@ -166,6 +196,8 @@ test_policy_user_lookups_are_indexed
 test_policy_identity_validation_is_wired
 test_csr_names_are_dns1123_with_hash
 test_audit_event_json_escapes_details
+test_root_log_path_overrides_are_ignored
+test_disable_user_uses_safe_kubeconfig_removal
 test_login_bootstrap_uses_private_temp_files
 test_daemon_connection_handling_is_bounded
 test_required_option_values_fail_cleanly

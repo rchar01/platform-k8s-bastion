@@ -97,12 +97,39 @@ csr_subject() {
   printf '%s' "$req" | base64 -d | openssl req -noout -subject
 }
 
+subject_field_values() {
+  local wanted="$1"
+  local line part key value
+
+  while IFS= read -r line; do
+    line="${line#subject= }"
+    line="${line#subject=}"
+    line="${line//\//,}"
+
+    IFS=',' read -ra parts <<< "$line"
+    for part in "${parts[@]}"; do
+      [[ "$part" == *=* ]] || continue
+      key="${part%%=*}"
+      value="${part#*=}"
+      key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      value="$(printf '%s' "$value" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      [[ "$key" == "$wanted" && -n "$value" ]] || continue
+      printf '%s\n' "$value"
+    done
+  done
+}
+
 subject_cn() {
-  sed -n 's/.*CN=\([^,/]*\).*/\1/p'
+  local value
+
+  while IFS= read -r value; do
+    printf '%s\n' "$value"
+    return 0
+  done < <(subject_field_values CN)
 }
 
 subject_groups() {
-  grep -o 'O=[^,/]*' | cut -d= -f2
+  subject_field_values O
 }
 
 user_exists() {
@@ -171,19 +198,24 @@ approve_csr() {
 
 bootstrap_token_owner_for_requester() {
   local requester="$1"
-  local token_id file owner
+  local token_id file owner expires_at expires_epoch now_epoch
 
   [[ "$requester" == system:bootstrap:* ]] || return 1
   token_id="${requester#system:bootstrap:}"
   [[ -n "$token_id" ]] || return 1
+  now_epoch="$(date -u +%s)"
 
   for file in "$BOOTSTRAP_DAEMON_TOKEN_CACHE_DIR"/*.json "$BOOTSTRAP_TOKEN_STATE_DIR"/*.json; do
     [[ -f "$file" ]] || continue
     owner="$(jq -r --arg tokenId "$token_id" 'if .tokenId == $tokenId then (.user // "") else "" end' "$file" 2> /dev/null || true)"
-    if [[ -n "$owner" ]]; then
-      printf '%s\n' "$owner"
-      return 0
-    fi
+    [[ -n "$owner" ]] || continue
+    expires_at="$(jq -r --arg tokenId "$token_id" 'if .tokenId == $tokenId then (.expiresAt // "") else "" end' "$file" 2> /dev/null || true)"
+    [[ -n "$expires_at" ]] || continue
+    expires_epoch="$(date -u -d "$expires_at" +%s 2> /dev/null || true)"
+    [[ -n "$expires_epoch" ]] || continue
+    ((expires_epoch > now_epoch)) || continue
+    printf '%s\n' "$owner"
+    return 0
   done
 
   return 1
@@ -383,4 +415,6 @@ main() {
   fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

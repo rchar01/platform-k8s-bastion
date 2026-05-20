@@ -7,6 +7,22 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-05-20
+
+### Fixed
+
+- Decode bootstrap daemon Unix peer credentials in Linux `pid, uid, gid` order.
+- Parse OpenSSL CSR subjects with spaced `CN =` and `O =` fields.
+- Redact daemon command failure details that may contain bootstrap token IDs.
+- Require unexpired bootstrap token ownership cache entries during CSR approval.
+- Remove disabled user kubeconfig files through the safe FD-based writer instead
+  of root-renaming user-controlled paths.
+- Remove stale bootstrap kubeconfigs after daemon token revoke using FD-based
+  cleanup.
+- Ignore environment-controlled audit and log file path overrides for root
+  commands.
+- Validate daemon bootstrap request TTL and reason before invoking token issuer.
+
 ## [1.1.2] - 2026-05-19
 
 ### Fixed

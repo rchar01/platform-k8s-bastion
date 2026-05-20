@@ -4,6 +4,27 @@ This file gives a short, release-oriented view of what changed between versions.
 
 ## Unreleased
 
+## v1.1.3 - 2026-05-20
+
+Runtime security hardening fixes.
+
+Highlights:
+
+- Bootstrap daemon peer credential decoding, request validation, and error
+  redaction are stricter.
+- CSR approval now handles common OpenSSL subject output and ignores expired
+  bootstrap token ownership caches.
+- User disablement now removes kubeconfig files through the safe FD-based writer.
+- Root commands no longer honor environment-controlled audit/log file paths.
+
+Operator impact:
+
+- `bastion-disable-user` removes `~/.kube/bootstrap` and `~/.kube/config`
+  instead of creating `.disabled.<timestamp>` backups.
+- Root-run commands ignore `BASTION_AUDIT_LOG` and `LOG_FILE`; use the default
+  audit and logging destinations managed by the host configuration.
+- Invalid daemon bootstrap TTL or reason values fail before token issuer calls.
+
 ## v1.1.2 - 2026-05-19
 
 Token cache and audit redaction update.

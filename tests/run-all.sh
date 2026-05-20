@@ -16,6 +16,7 @@ main() {
   run_test "Policy lookup and audit JSON safety" "${SCRIPT_DIR}/scenarios/test-policy-audit-safety.sh"
   run_test "Token cache safety" "${SCRIPT_DIR}/scenarios/test-token-cache-safety.sh"
   run_test "CSR cleanup selector" "${SCRIPT_DIR}/scenarios/test-csr-cleanup-selector.sh"
+  run_test "CSR approver parser and token cache safety" "${SCRIPT_DIR}/scenarios/test-csr-approver-safety.sh"
   run_test "CSR approval race hardening" "${SCRIPT_DIR}/scenarios/test-csr-approver-approval-race.sh"
   printf '==> Kubeconfig writer unit tests\n'
   python3 "${SCRIPT_DIR}/scenarios/test-kubeconfig-writer.py"

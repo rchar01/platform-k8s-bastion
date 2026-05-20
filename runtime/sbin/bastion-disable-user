@@ -48,6 +48,8 @@ source "${LIB_DIR}/log.sh"
 source "${LIB_DIR}/common.sh"
 source "${LIB_DIR}/policy.sh"
 
+KUBECONFIG_WRITER="${LIB_DIR}/python/bastion_kubeconfig_writer.py"
+
 # --------------------------------------------------
 # Defaults
 # --------------------------------------------------
@@ -58,7 +60,7 @@ DRY_RUN=0
 FORCE=0
 
 REMOVED_GROUPS=0
-DISABLED_FILES=0
+REMOVED_FILES=0
 SKIPPED_GROUPS=0
 
 usage() {
@@ -68,8 +70,8 @@ Usage:
 
 Removes bastion-managed Kubernetes access for a target user by:
   - removing matching bastion groups from the host user
-  - disabling ~/.kube/bootstrap
-  - disabling ~/.kube/config
+  - removing ~/.kube/bootstrap
+  - removing ~/.kube/config
 
 Expected workflow:
   1. Remove or update the user in bastion policy
@@ -143,17 +145,33 @@ run_cmd() {
   "$@"
 }
 
-disable_file_if_present() {
-  local path="$1"
+remove_kube_files() {
+  local user="$1"
+  local home_dir="$2"
+  local result removed=0
 
-  [[ -f "$path" ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    [[ -e "$home_dir/.kube/bootstrap" ]] && removed=$((removed + 1))
+    [[ -e "$home_dir/.kube/config" ]] && removed=$((removed + 1))
+    log_info "DRY RUN: remove $home_dir/.kube/bootstrap and $home_dir/.kube/config"
+    REMOVED_FILES=$((REMOVED_FILES + removed))
+    return 0
+  fi
 
-  local backup
-  backup="${path}.disabled.$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ -f "$KUBECONFIG_WRITER" ]] || die "Kubeconfig writer not found: $KUBECONFIG_WRITER"
+  if ! result="$(python3 "$KUBECONFIG_WRITER" --user "$user" --home-dir "$home_dir" --dest config --remove bootstrap --remove config 2>&1)"; then
+    die "Failed to remove kubeconfig files for $user: $result"
+  fi
 
-  log_info "Disabling file: $path -> $backup"
-  run_cmd mv "$path" "$backup"
-  DISABLED_FILES=$((DISABLED_FILES + 1))
+  if [[ $'\n'"$result"$'\n' == *$'\nremoved bootstrap\n'* ]]; then
+    log_info "Removed bootstrap kubeconfig for $user"
+    removed=$((removed + 1))
+  fi
+  if [[ $'\n'"$result"$'\n' == *$'\nremoved config\n'* ]]; then
+    log_info "Removed user kubeconfig for $user"
+    removed=$((removed + 1))
+  fi
+  REMOVED_FILES=$((REMOVED_FILES + removed))
 }
 
 remove_group_if_member() {
@@ -178,15 +196,12 @@ remove_group_if_member() {
 }
 
 disable_kube_access() {
-  local home_dir kube_dir
+  local home_dir
 
   home_dir="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
   [[ -n "$home_dir" ]] || die "Cannot resolve home directory for user: $TARGET_USER"
 
-  kube_dir="$home_dir/.kube"
-
-  disable_file_if_present "$kube_dir/bootstrap"
-  disable_file_if_present "$kube_dir/config"
+  remove_kube_files "$TARGET_USER" "$home_dir"
 }
 
 remove_bastion_groups() {
@@ -206,7 +221,7 @@ remove_bastion_groups() {
 show_summary() {
   log_info "Disable summary for $TARGET_USER"
   log_info "Removed groups: $REMOVED_GROUPS"
-  log_info "Disabled kubeconfig files: $DISABLED_FILES"
+  log_info "Removed kubeconfig files: $REMOVED_FILES"
 
   if [[ "$SKIPPED_GROUPS" -gt 0 ]]; then
     log_warn "Skipped groups: $SKIPPED_GROUPS"
@@ -231,8 +246,7 @@ main() {
   need_cmd id
   need_cmd grep
   need_cmd tr
-  need_cmd mv
-  need_cmd date
+  need_cmd python3
   need_cmd gpasswd
 
   parse_args "$@"

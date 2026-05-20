@@ -114,6 +114,25 @@ class KubeconfigWriterTests(unittest.TestCase):
         self.assertTrue((kube_dir / "bootstrap").is_symlink())
         self.assertEqual((self.home / "target").read_text(encoding="utf-8"), "owned\n")
 
+    def test_remove_deletes_regular_kube_file(self) -> None:
+        bastion_kubeconfig_writer.install_user_kube_file(
+            self.user,
+            str(self.home),
+            "bootstrap",
+            b"apiVersion: v1",
+            allow_non_home=True,
+        )
+
+        removed = bastion_kubeconfig_writer.remove_user_kube_file(
+            self.user,
+            str(self.home),
+            "bootstrap",
+            allow_non_home=True,
+        )
+
+        self.assertTrue(removed)
+        self.assertFalse((self.home / ".kube/bootstrap").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

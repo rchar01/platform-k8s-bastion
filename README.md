@@ -99,7 +99,7 @@ are intended to be pinned by `platform-config` as a git submodule tag, for
 example:
 
 ```bash
-git -C vendor/platform-k8s-bastion checkout v1.1.2
+git -C vendor/platform-k8s-bastion checkout v1.1.3
 ```
 
 When a tag changes installed runtime behavior, `runtime/VERSION` should match
@@ -121,6 +121,10 @@ Release notes:
 - Users can request certificates but cannot approve them or request arbitrary groups.
 - Admins enforce access through host group membership, policy-driven bootstrap, and CSR approval.
 - Certificates are short-lived and renewed through the installed runtime commands.
+- Root-run runtime commands use fixed audit/log destinations and do not honor
+  environment-provided log file paths.
+- `bastion-disable-user` removes bastion-managed kubeconfig files instead of
+  preserving disabled backup copies.
 
 ## License
 
