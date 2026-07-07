@@ -53,6 +53,8 @@ This repository owns:
 
 `platform-private` owns real inventories, access policies, and non-secret cluster-specific config. Secret material such as admin kubeconfigs, tokens, and private keys belongs outside Git.
 
+`platform-tools` provides optional public tooling such as `platform-bastion-policy` for validating and rendering bastion access-policy inputs before `platform-config` applies them.
+
 ## Runtime Commands
 
 Public commands:
@@ -91,6 +93,8 @@ make test
 ```
 
 End-to-end host installation tests belong in `platform-config`, not here.
+
+Bastion access-policy validation and rendering helpers live in `platform-tools`, not in this runtime repository.
 
 ## Release
 
