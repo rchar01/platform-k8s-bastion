@@ -1,12 +1,30 @@
-# Kubernetes Bastion Runtime
-
 <div align="center">
   <img src="assets/brand/platform-k8s-bastion-forge-avatar-transparent-512.png" width="256" alt="Kubernetes Bastion Runtime logo">
+
+  <h1>Kubernetes Bastion Runtime</h1>
+
+  <p>Runtime commands and libraries for Kubernetes bastion hosts.</p>
 </div>
+
+---
 
 `platform-k8s-bastion` is the runtime artifact source for Kubernetes bastion hosts.
 
 Host installation, OS packages, external CLI downloads, `/etc/bastion` files, login profile, and systemd units are owned by `platform-config` Ansible. This repository intentionally does not install or configure hosts directly.
+
+## Platform Repository Roles
+
+The platform repositories are split by responsibility:
+
+| Repository | Purpose |
+| --- | --- |
+| `platform-k8s-bastion` | Provides the runtime commands, libraries, and install manifest consumed by bastion hosts. |
+| `platform-config` | Installs this runtime, writes host configuration, deploys Kubernetes-side apps, manages systemd/login integration, and runs live smoke tests. |
+| `platform-private` | Stores real inventories, access policies, and non-secret cluster-specific config. |
+| `platform-tools` | Provides optional public helper commands, including `platform-bastion-policy` for validating and rendering bastion access-policy inputs. |
+
+Secret material such as admin kubeconfigs, tokens, private keys, and signing keys
+belongs outside Git.
 
 ## Layout
 
@@ -46,16 +64,32 @@ This repository owns:
 - downloading external tools such as `kubectl`, `helm`, `jq`, `yq`, and registry tools
 - copying this runtime into `/usr/local`
 - writing `/etc/bastion/access-policy.yaml`, `/etc/bastion/admin.kubeconfig`, and `/etc/bastion/ca.crt`
+- deploying Kubernetes-side apps required by `docs/kubernetes-app-requirements.md`
 - writing `/etc/profile.d/bastion-login.sh`
 - managing systemd services and timers
 - running Ansible smoke tests
 - rendering runtime and external tool visibility in the login profile
 
-`platform-private` owns real inventories, access policies, and non-secret cluster-specific config. Secret material such as admin kubeconfigs, tokens, and private keys belongs outside Git.
+`platform-private` owns real inventories, access policies, and non-secret cluster-specific config. Secret material such as admin kubeconfigs, tokens, private keys, and signing keys belongs outside Git.
 
 `platform-tools` provides optional public tooling such as `platform-bastion-policy` for validating and rendering bastion access-policy inputs before `platform-config` applies them.
 
-## Runtime Commands
+## Policy Flow
+
+Access-policy authoring and rendering happen before this runtime consumes the
+host file:
+
+```text
+platform-private access-policy input
+  -> platform-tools platform-bastion-policy validation and rendering
+  -> platform-config installs /etc/bastion/access-policy.yaml
+  -> platform-k8s-bastion runtime consumes the installed policy
+```
+
+The runtime reads the installed host policy from `/etc/bastion/access-policy.yaml`.
+It does not merge policy overlays or apply Kubernetes resources directly.
+
+## Installed Commands
 
 Public commands:
 
@@ -94,7 +128,11 @@ make test
 
 End-to-end host installation tests belong in `platform-config`, not here.
 
-Bastion access-policy validation and rendering helpers live in `platform-tools`, not in this runtime repository.
+Bastion access-policy validation and rendering helpers live in `platform-tools`,
+not in this runtime repository.
+
+Kubernetes-side app requirements for the bootstrap token issuer and certificate
+controller are documented in `docs/kubernetes-app-requirements.md`.
 
 ## Release
 
@@ -132,4 +170,4 @@ Release notes:
 
 ## License
 
-MIT License. See `LICENSE`.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

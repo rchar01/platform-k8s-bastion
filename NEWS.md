@@ -4,6 +4,15 @@ This file gives a short, release-oriented view of what changed between versions.
 
 ## Unreleased
 
+Documentation updates.
+
+Highlights:
+
+- Documented Kubernetes-side app requirements for the bootstrap token issuer and
+  certificate controller deployment boundary with `platform-config`.
+- Clarified the README repository boundaries, policy flow, and optional
+  `platform-tools` access-policy helper usage.
+
 ## v1.1.3 - 2026-05-20
 
 Runtime security hardening fixes.

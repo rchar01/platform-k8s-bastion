@@ -7,6 +7,16 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Document Kubernetes-side app requirements for the bootstrap token issuer and
+  certificate controller deployment boundary with `platform-config`.
+
+### Changed
+
+- Clarify README repository boundaries, policy flow, and optional
+  `platform-tools` access-policy helper usage.
+
 ## [1.1.3] - 2026-05-20
 
 ### Fixed
