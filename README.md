@@ -18,10 +18,10 @@ The platform repositories are split by responsibility:
 
 | Repository | Purpose |
 | --- | --- |
-| `platform-k8s-bastion` | Provides the runtime commands, libraries, and install manifest consumed by bastion hosts. |
-| `platform-config` | Installs this runtime, writes host configuration, deploys Kubernetes-side apps, manages systemd/login integration, and runs live smoke tests. |
+| [`platform-k8s-bastion`](https://codeberg.org/rch/platform-k8s-bastion) | Provides the runtime commands, libraries, and install manifest consumed by bastion hosts. |
+| [`platform-config`](https://codeberg.org/rch/platform-config) | Installs this runtime, writes host configuration, deploys Kubernetes-side apps, manages systemd/login integration, and runs live smoke tests. |
 | `platform-private` | Stores real inventories, access policies, and non-secret cluster-specific config. |
-| `platform-tools` | Provides optional public helper commands, including `platform-bastion-policy` for validating and rendering bastion access-policy inputs. |
+| [`platform-tools`](https://codeberg.org/rch/platform-tools) | Provides optional public helper commands, including `platform-bastion-policy` for validating and rendering bastion access-policy inputs. |
 
 Secret material such as admin kubeconfigs, tokens, private keys, and signing keys
 belongs outside Git.
